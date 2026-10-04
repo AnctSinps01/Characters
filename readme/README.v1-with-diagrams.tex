@@ -1,0 +1,372 @@
+% !TeX program = xelatex
+\documentclass[UTF8,fontset=fandol,zihao=5,a4paper]{ctexart}
+\usepackage[margin=18mm]{geometry}
+\usepackage{amsmath,amssymb,graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
+\usepackage[hidelinks]{hyperref}
+\definecolor{ink}{HTML}{263445}
+\definecolor{refblue}{HTML}{E7F0F9}
+\definecolor{refline}{HTML}{467AA8}
+\definecolor{genorange}{HTML}{FCEDD9}
+\definecolor{genline}{HTML}{BA8036}
+\definecolor{outgreen}{HTML}{E6F1E9}
+\definecolor{outline}{HTML}{4E8461}
+\definecolor{timepink}{HTML}{F6E8ED}
+\definecolor{timeline}{HTML}{AC657C}
+\definecolor{papergray}{HTML}{F3F5F7}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\linespread{1.15}
+\setlength{\abovedisplayskip}{6pt}
+\setlength{\belowdisplayskip}{6pt}
+\ctexset{section={format=\large\bfseries,beforeskip=11pt,afterskip=5pt},
+  subsection={format=\normalsize\bfseries,beforeskip=8pt,afterskip=3pt}}
+\setcounter{section}{-1}
+\pagestyle{plain}
+\tikzset{
+  arr/.style={-{Latex[length=1.8mm]},line width=.7pt,draw=ink},
+  cond/.style={arr,draw=refline,line width=.9pt},
+  timearr/.style={arr,draw=timeline,dashed},
+  block/.style={draw=ink!65,rounded corners=2pt,align=center,
+    minimum height=10mm,inner sep=4pt,font=\small,fill=white},
+  ref/.style={block,draw=refline,fill=refblue},
+  gen/.style={block,draw=genline,fill=genorange},
+  resultbox/.style={block,draw=outline,fill=outgreen},
+  tm/.style={block,draw=timeline,fill=timepink},
+  lab/.style={font=\scriptsize,align=center,text=ink},
+  panel/.style={rounded corners=4pt,draw=ink!18,fill=papergray}
+}
+
+
+% Tensor pictograms: rows are spatial blocks, columns are feature components.
+% Grid cells are schematic; printed dimensions, not drawn cell counts, define size.
+\newcommand{\matpic}[7]{%
+  \node[inner sep=0pt,minimum width=#3cm,minimum height=#4cm] (#1) at (#2) {};
+  \filldraw[fill=#5!10,draw=#5,line width=.65pt]
+    (#1.south west) rectangle (#1.north east);
+  \foreach \f in {.2,.4,.6,.8}{
+    \draw[#5!32,line width=.25pt] ($(#1.south west)!\f!(#1.south east)$)--($(#1.north west)!\f!(#1.north east)$);
+    \draw[#5!32,line width=.25pt] ($(#1.south west)!\f!(#1.north west)$)--($(#1.south east)!\f!(#1.north east)$);
+  }
+  \node[font=\small,fill=white,fill opacity=.92,text opacity=1,inner sep=1.5pt] at (#1.center) {#6};
+  \node[font=\scriptsize,align=center,anchor=north,inner sep=2pt] at ($(#1.south)+(0,-.08)$) {#7};
+}
+\newcommand{\vecpic}[6]{%
+  \node[inner sep=0pt,minimum width=#3cm,minimum height=.25cm] (#1) at (#2) {};
+  \filldraw[fill=#4!17,draw=#4,line width=.65pt] (#1.south west) rectangle (#1.north east);
+  \foreach \f in {.1,.2,.3,.4,.5,.6,.7,.8,.9}{
+    \draw[#4!50,line width=.25pt] ($(#1.south west)!\f!(#1.south east)$)--($(#1.north west)!\f!(#1.north east)$);
+  }
+  \node[font=\small,anchor=south,inner sep=3pt] at (#1.north) {#5};
+  \node[font=\scriptsize,align=center,anchor=north,inner sep=3pt] at (#1.south) {#6};
+}
+\newcommand{\pairpic}[5]{%
+  \node[inner sep=0pt,minimum width=1.8cm,minimum height=1.75cm] (#1) at (#2) {};
+  \begin{scope}[shift={(#1.center)},x={(.87cm,.19cm)},y={(0cm,.82cm)}]
+    \filldraw[draw=#3!75,fill=#3!9] (-.65,-.35) rectangle (.85,1.15);
+    \foreach \f in {-.35,-.05,.25,.55}{\draw[#3!25,line width=.25pt] (\f,-.35)--(\f,1.15);}
+    \foreach \f in {-.05,.25,.55,.85}{\draw[#3!25,line width=.25pt] (-.65,\f)--(.85,\f);}
+    \node[fill=white,inner sep=1pt,font=\small] at (.10,.65) {#5};
+    \filldraw[draw=#3,fill=#3!14] (-.95,-1.05) rectangle (.55,.45);
+    \foreach \f in {-.65,-.35,-.05,.25}{\draw[#3!35,line width=.25pt] (\f,-1.05)--(\f,.45);}
+    \foreach \f in {-.75,-.45,-.15,.15}{\draw[#3!35,line width=.25pt] (-.95,\f)--(.55,\f);}
+    \node[fill=white,inner sep=1pt,font=\small] at (-.2,-.3) {#4};
+  \end{scope}
+}
+\newcommand{\figcaption}[1]{\par\vspace{3pt}{\small #1}\par}
+\tikzset{
+  op/.style={draw=ink!55,fill=white,rounded corners=2pt,align=center,font=\scriptsize,inner sep=4pt,minimum height=.7cm},
+  sum/.style={circle,draw=ink,fill=white,inner sep=0pt,minimum size=.34cm,font=\small},
+  stitle/.style={font=\small\bfseries,anchor=west,text=ink},
+  tinylabel/.style={font=\scriptsize,align=center,text=ink},
+  route/.style={arr,rounded corners=2pt},
+}
+
+\begin{document}
+\begin{center}
+  {\LARGE\bfseries Glyph2Hand}\par
+  \vspace{2pt}
+  {\normalsize 成对参考条件下的单字生成：交叉注意力 DiT 与流匹配}
+\end{center}
+
+\section{基本介绍}
+根据同一书写者的样本字，生成指定汉字的手写图。
+输入为样本序列 $(H_i)_{i=1}^m$、对应的楷体序列 $(K_i)_{i=1}^m$，以及目标字的楷体图 $K_\star$；
+$H_i$ 与 $K_i$ 表示同一个汉字，$m\geq1$。输出 $\widehat H_\star$ 应保持目标字内容，并符合样本笔迹风格。
+所有图像均为 $n\times n$ 单通道灰度图。参考对整体重排不改变输出；每对内部的对应关系必须保留。目前为首版设计，尚未实现和验证效果。
+
+\section{模型架构}
+直接在灰度图空间学习从高斯噪声到手写字的连续变化。
+DiT 指用于这一生成过程的 Transformer；每层均用交叉注意力读取参考特征。
+
+
+\begin{center}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  % Visual legend. Deliberately distinguish data tensors from operations.
+  \matpic{lgimg}{.65,0}{.5}{.5}{ink}{}{}
+  \node[tinylabel,anchor=west] at (1.05,0) {方形网格：图像};
+  \vecpic{lgvec}{5.0,0}{1.0}{genline}{}{}
+  \node[tinylabel,anchor=west] at (5.65,0) {长条：一个向量};
+  \matpic{lgmat}{9.1,0}{.9}{.55}{refline}{}{}
+  \node[tinylabel,anchor=west] at (9.7,0) {多行网格：特征矩阵};
+  \node[op] at (14.35,0) {圆角框：计算操作};
+  \node[tinylabel,anchor=west] at (0,-.62) {网格与叠层仅示意形状；实际大小以尺寸标注为准。所有图均省略批次维。};
+
+  \draw[panel,fill=refblue!28] (-.1,-1.0) rectangle (16.5,-5.3);
+  \node[stitle,text=refline] at (.15,-1.35) {A\quad 参考编码：同一流程独立处理 $m$ 对图像};
+  \pairpic{pairs}{1.35,-3.05}{refline}{$H_i$}{$K_i$}
+  \node[tinylabel] at (1.35,-4.40) {样本／对应楷体\\沿通道拼接：$n\times n\times2$};
+  \node[op,draw=refline,text width=1.85cm] (rp) at (4.45,-3.0)
+    {分成 $L$ 块\\每块展开为 $2p^2$\\线性映射 $2p^2\to d$};
+  \matpic{rt}{7.4,-3.0}{1.65}{1.6}{refline}{$L\times d$}{每行对应一个图像块\\加图内二维位置}
+  \node[op,draw=refline,text width=1.85cm] (enc) at (10.55,-3.0)
+    {共享编码器 $E$\\Transformer $\times B_E$\\输出 $R_i:L\times d$};
+  \matpic{memory}{14.35,-3.0}{1.75}{2.3}{refline}{$R$}{$mL\times d$\\全部参考块的特征}
+  \draw[refline,line width=1.1pt] ($(memory.south west)!.33!(memory.north west)$)--($(memory.south east)!.33!(memory.north east)$);
+  \draw[refline,line width=1.1pt] ($(memory.south west)!.67!(memory.north west)$)--($(memory.south east)!.67!(memory.north east)$);
+  \draw[cond] (pairs.east)--(rp.west); \draw[cond] (rp)--(rt);
+  \draw[cond] (rt)--(enc); \draw[cond] (enc)--node[above,tinylabel] {沿行合并}(memory);
+  \node[tinylabel,anchor=west] at (.2,-4.95)
+    {每对保留 $L$ 个向量；不平均成一个向量。图内位置保留，参考对不编号。生成前只计算一次 $R$。};
+
+  \draw[panel] (-.1,-5.75) rectangle (16.5,-10.85);
+  \node[stitle] at (.15,-6.1) {B\quad 速度网络：目标图的每个位置读取参考，预测本步速度};
+  \pairpic{target}{1.35,-8.0}{genline}{$x_t$}{$K_\star$}
+  \node[tinylabel] at (1.35,-9.35) {当前图像／目标楷体\\通道拼接：$n\times n\times2$};
+  \node[op,draw=genline,text width=1.55cm] (tp) at (4.0,-8.0)
+    {分块、展开\\线性映射\\加二维位置};
+  \matpic{z0}{6.4,-8.0}{1.25}{1.6}{genline}{$Z_0$}{$L\times d$}
+  \node[gen,text width=1.85cm,minimum height=1.55cm,font=\small] (dit) at (9.1,-8.0)
+    {\textbf{DiT $\times B$}\\自注意力\\交叉注意力\\前馈网络};
+  \node[op,draw=outline,text width=1.75cm] (head) at (12.0,-8.0)
+    {时间调节的归一化\\线性映射 $d\to p^2$\\按块位置还原};
+  \matpic{velocity}{14.8,-8.0}{1.25}{1.25}{outline}{$\widehat v_t$}{$n\times n\times1$\\像素速度，不是最终字图}
+  \draw[arr] (target.east)--(tp); \draw[arr] (tp)--(z0);
+  \draw[arr] (z0)--(dit); \draw[arr] (dit)--node[above,tinylabel] {$Z_B$}(head);
+  \draw[arr] (head)--(velocity);
+  \draw[cond,rounded corners=2pt] (memory.east)--(16.15,-3.0)--(16.15,-5.5)--(9.1,-5.5)--(dit.north);
+  \node[tinylabel,text=refline,fill=papergray,inner sep=2pt] at (10.7,-6.7) {$R$ 提供每层的键、值};
+  \vecpic{te}{6.4,-10.05}{1.5}{timeline}{$e(t)$}{时间编码}
+  \node[tinylabel,anchor=east] at (5.30,-10.05) {$t\in[0,1]\ \longrightarrow$};
+  \draw[timearr] (te.east)--(9.1,-10.05)--(dit.south);
+  \draw[timearr] (9.1,-10.05)--(12.0,-10.05)--(head.south);
+
+  \draw[panel,fill=outgreen!25] (-.1,-11.25) rectangle (16.5,-15.45);
+  \node[stitle,text=outline] at (.15,-11.62) {C\quad 生成：固定 $R,K_\star$，反复调用 B 并累积像素变化};
+  \matpic{noise}{1.0,-13.0}{1.1}{1.1}{ink}{$\epsilon$}{$x_0=\epsilon$}
+  \matpic{xt}{4.0,-13.0}{1.1}{1.1}{genline}{$x_t$}{当前状态}
+  \node[op,draw=outline,text width=3.2cm] (update) at (8.0,-13.0)
+    {调用速度网络 B\\$x_{t+\Delta t}=x_t+\Delta t\,\widehat v_t$};
+  \matpic{next}{11.8,-13.0}{1.1}{1.1}{genline}{$x_{t+\Delta t}$}{更新后的状态}
+  \matpic{final}{15.0,-13.0}{1.1}{1.1}{outline}{$\widehat H_\star$}{最后裁剪并映射灰度}
+  \draw[arr] (noise)--(xt); \draw[arr] (xt)--(update); \draw[arr] (update)--(next);
+  \draw[arr] (next)--node[above,tinylabel] {$t=1$}(final);
+  \draw[route] (next.east)--(12.6,-13.0)--(12.6,-14.75)--(3.15,-14.75)--(3.15,-13.0)--(xt.west);
+  \node[tinylabel,fill=outgreen!25,inner sep=2pt] at (8,-14.75) {$t\leftarrow t+\Delta t$，未到 $1$ 则继续；$\Delta t=1/J$};
+\end{tikzpicture}
+\figcaption{图 1：总体数据流。蓝色为参考，橙色为目标生成特征，粉色虚线为时间条件，绿色为输出。}
+\end{center}
+
+\newpage
+\subsection{图像分块与参考编码}
+参考分支将 $H_i,K_i$ 沿通道拼接；目标分支将 $x_t,K_\star$ 沿通道拼接，均得到双通道图。
+将图像划分为不重叠的 $p\times p$ 块，要求 $p$ 整除 $n$；每张图有 $L=(n/p)^2$ 块。
+每块线性映射为 $d$ 维向量，并加入固定二维正弦余弦位置编码。
+参考编码器由 $B_E$ 层 Transformer 组成，每层依次采用层归一化、自注意力及残差相加，再采用层归一化、两层前馈网络及残差相加。
+前馈网络使用 GELU 激活。每对参考独立编码，输出 $R_i$；沿块列表合并得到 $R$，不做全局平均。
+时间 $t$ 采用正弦余弦编码后经两层前馈网络（SiLU 激活）得到时间特征，再送入各 DiT 层和输出头。
+首版不使用随机丢弃特征的 dropout；生成时除初始噪声外不引入额外随机量。
+
+
+\begin{center}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \draw[panel] (-.1,.45) rectangle (16.5,-3.85);
+  \node[stitle] at (.15,.08) {A\quad 一个空间位置：两个通道的同位置小块，组成一个输入向量};
+  \pairpic{fullpair}{1.35,-1.7}{refline}{$H_i$}{$K_i$}
+  \node[tinylabel] at (1.35,-3.12) {$n\times n\times2$};
+  \pairpic{crop}{4.8,-1.7}{refline}{$h_{i,\ell}$}{$k_{i,\ell}$}
+  \node[tinylabel] at (4.8,-3.12) {第 $\ell$ 块：$p\times p\times2$};
+  \vecpic{raw}{8.35,-1.7}{2.25}{refline}{$u_{i,\ell}$}{$2p^2$ 个灰度值}
+  \node[op,draw=refline,text width=1.1cm] (proj) at (11.15,-1.7) {线性映射\\$2p^2\to d$};
+  \vecpic{feat}{14.45,-1.7}{2.1}{refline}{$z_{i,\ell}$}{$d$ 个特征值}
+  \draw[arr] (fullpair)--node[above,tinylabel] {取同位置块}(crop);
+  \draw[arr] (crop)--node[above,tinylabel] {展开}(raw);
+  \draw[arr] (raw)--(proj); \draw[arr] (proj)--(feat);
+  \node[tinylabel,anchor=west] at (.2,-3.55) {叠放表示两个通道，不是两张图混合求平均；展开只改变排列，线性映射才含可学习参数。};
+
+  \draw[panel,fill=refblue!25] (-.1,-4.25) rectangle (16.5,-10.6);
+  \node[stitle,text=refline] at (.15,-4.62) {B\quad 一整对参考：$L$ 个向量排列成矩阵，逐对编码后合并};
+  \matpic{allz}{1.6,-6.4}{2.0}{1.6}{refline}{$[z_{i,1};\ldots;z_{i,L}]$}{$L$ 行、每行 $d$ 个数}
+  \node[sum] (addpos) at (4.05,-6.4) {$+$};
+  \matpic{pos}{4.05,-8.6}{1.3}{1.0}{refline}{$P_{xy}$}{$L\times d$，固定二维位置}
+  \node[op,draw=refline,text width=2.8cm,minimum height=1.45cm] (refenc) at (7.0,-6.4)
+    {共享参考编码器 $E$\\$[\mathrm{LN}\to\text{自注意力}\to+ ]$\\$[\mathrm{LN}\to\text{前馈网络}\to+ ]$\\重复 $B_E$ 层};
+  \matpic{ri}{10.35,-6.4}{1.55}{1.6}{refline}{$R_i$}{$L\times d$}
+  \matpic{rall}{14.4,-7.0}{1.8}{3.3}{refline}{}{$mL\times d$}
+  \node[font=\small,fill=white,inner sep=1pt] at (14.4,-5.95) {$R_1$};
+  \node[font=\small,fill=white,inner sep=1pt] at (14.4,-6.85) {$\vdots$};
+  \node[font=\small,fill=white,inner sep=1pt] at (14.4,-7.95) {$R_m$};
+  \draw[refline,line width=1pt] (13.5,-6.4)--(15.3,-6.4);
+  \draw[refline,line width=1pt] (13.5,-7.45)--(15.3,-7.45);
+  \draw[arr] (allz)--(addpos); \draw[cond] (pos.north)--(addpos.south);
+  \draw[arr] (addpos)--(refenc); \draw[arr] (refenc)--(ri);
+  \draw[cond] (ri.east)--(12.2,-6.4)--(12.2,-7.0)--(rall.west);
+  \node[tinylabel] at (12.15,-5.35) {独立重复 $m$ 对\\沿行合并};
+  \node[tinylabel,text width=7cm,anchor=west,align=left] at (6.0,-8.95)
+    {每个 $R_i$ 内部保留二维位置。\\换参考对顺序，只重排 $R$ 中的整组行。\\不添加对序号，不做全局平均。};
+  \node[tinylabel,anchor=west] at (.2,-10.15) {目标分支同样把 $x_t,K_\star$ 分块并投影为 $Z_0$，随后进入 DiT；两条分支的投影参数不要求共享。};
+
+  \draw[panel,fill=outgreen!25] (-.1,-11.0) rectangle (16.5,-17.0);
+  \node[stitle,text=outline] at (.15,-11.38) {C\quad 输出头：每行得到一个速度块，再按原位置拼回图像};
+  \matpic{zb}{1.0,-13.0}{1.2}{1.6}{genline}{$Z_B$}{$L\times d$}
+  \node[op,text width=1.3cm] (an) at (3.2,-13.0) {时间调节\\层归一化};
+  \node[op,draw=outline,text width=1.3cm] (outlin) at (5.6,-13.0) {线性映射\\$d\to p^2$};
+  \matpic{outrows}{8.05,-13.0}{1.6}{1.6}{outline}{$Y$}{$L\times p^2$}
+  \node[op,draw=outline,text width=1.8cm] (unpatch) at (11.15,-13.0)
+    {每行排成 $p\times p$\\按二维块位置拼接\\无可学习参数};
+  \matpic{vmap}{14.8,-13.0}{1.55}{1.55}{outline}{$\widehat v_t$}{$n\times n\times1$}
+  \draw[arr] (zb)--(an); \draw[arr] (an)--(outlin); \draw[arr] (outlin)--(outrows);
+  \draw[arr] (outrows)--(unpatch); \draw[arr] (unpatch)--(vmap);
+  \vecpic{rowv}{7.95,-15.55}{2.6}{outline}{第 $\ell$ 行：$p^2$ 个速度值}{一个图像块的输出向量}
+  \draw[outline,densely dashed] (outrows.west)--(6.85,-13.0)--(6.85,-14.6)--(6.25,-14.6)--(6.25,-15.55)--(rowv.west);
+  \matpic{onepatch}{11.4,-15.55}{.85}{.85}{outline}{}{$p\times p$ 速度块}
+  \draw[arr] (rowv.east)--node[above,tinylabel] {重新排列}(onepatch.west);
+  \node[tinylabel,text width=3.45cm] at (14.25,-15.55) {$L$ 个小块按原位置拼成一张图\\$Lp^2=n^2$\\线性头后只重排，不加解码器。};
+\end{tikzpicture}
+\figcaption{图 2：输入与输出形状详解。特征矩阵每行代表一个空间块；斜叠的图像平面表示通道。}
+\end{center}
+
+\newpage
+\subsection{DiT 层与交叉注意力}
+每个 DiT 层按图 3 顺序计算。自注意力连接目标图内的所有块；交叉注意力让每个目标块读取所有参考块；前馈网络逐块更新特征。
+
+
+\begin{center}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \draw[panel] (-.1,1.2) rectangle (16.5,-3.9);
+  \node[stitle] at (.15,.83) {A\quad 一个 DiT 层：三次更新、三条残差旁路};
+  \matpic{zin}{.6,-1.15}{.8}{1.1}{genline}{$Z$}{$L\times d$}
+  \node[op,draw=genline,text width=2.15cm,minimum height=1.3cm] (sa) at (3.0,-1.15)
+    {AdaLN$(\cdot,t)$\\多头自注意力\\逐特征乘门控 $g_1(t)$};
+  \node[sum] (s1) at (4.7,-1.15) {$+$};
+  \node[op,draw=genline,text width=2.15cm,minimum height=1.3cm] (ca) at (7.1,-1.15)
+    {AdaLN$(\cdot,t)$\\多头交叉注意力\\逐特征乘门控 $g_2(t)$};
+  \node[sum] (s2) at (8.8,-1.15) {$+$};
+  \node[op,draw=genline,text width=2.15cm,minimum height=1.3cm] (ff) at (11.2,-1.15)
+    {AdaLN$(\cdot,t)$\\两层前馈网络\\逐特征乘门控 $g_3(t)$};
+  \node[sum] (s3) at (12.9,-1.15) {$+$};
+  \matpic{zout}{15.15,-1.15}{1.1}{1.1}{genline}{$Z^+$}{$L\times d$}
+  \draw[arr] (zin)--(sa); \draw[arr] (sa)--(s1); \draw[arr] (s1)--(ca);
+  \draw[arr] (ca)--(s2); \draw[arr] (s2)--(ff); \draw[arr] (ff)--(s3); \draw[arr] (s3)--(zout);
+  \draw[route] (1.35,-1.15)--(1.35,.1)--(4.7,.1)--(s1.north);
+  \draw[route] (5.15,-1.15)--(5.15,.1)--(8.8,.1)--(s2.north);
+  \draw[route] (9.25,-1.15)--(9.25,.1)--(12.9,.1)--(s3.north);
+  \node[tinylabel,fill=papergray] at (3,.1) {直接保留子层输入};
+  \node[tinylabel,fill=papergray] at (7.1,.1) {直接保留子层输入};
+  \node[tinylabel,fill=papergray] at (11.2,.1) {直接保留子层输入};
+  \vecpic{timevec}{3,-3.05}{1.7}{timeline}{$e(t)$}{本层映射出三组 $a,b,g$}
+  \draw[timearr] (timevec.north)--(sa.south);
+  \draw[timearr] (timevec.east)--(5.05,-3.05)--(5.05,-2.2)--(11.2,-2.2)--(ff.south);
+  \draw[timearr] (7.1,-2.2)--(ca.south);
+  \matpic{rsmall}{14.6,-3.0}{1.0}{.65}{refline}{$R$}{$mL\times d$}
+  \draw[cond,rounded corners=2pt] (rsmall.west)--(13.7,-3.0)--(13.7,-2.50)--(7.8,-2.50)--([xshift=7mm]ca.south);
+  \node[tinylabel,text=refline,fill=papergray] at (11.1,-3.1) {参考经 LN 和线性映射提供 $K,V$};
+
+  \draw[panel,fill=refblue!18] (-.1,-4.35) rectangle (16.5,-12.5);
+  \node[stitle] at (.15,-4.72) {B\quad 交叉注意力放大：一个头如何为每个目标块读取参考};
+  \node[tinylabel,anchor=west] at (.2,-5.25)
+    {$Q=\operatorname{AdaLN}(Z,t)W_Q$ 来自目标；$K=\operatorname{LN}(R)W_K$、$V=\operatorname{LN}(R)W_V$ 来自参考。};
+  \matpic{q}{1.0,-6.85}{1.0}{1.4}{genline}{$Q$}{$L\times d_h$}
+  \node[font=\large] at (2.05,-6.85) {$\times$};
+  \matpic{kt}{3.75,-6.85}{2.25}{.75}{refline}{$K^\top$}{$d_h\times mL$}
+  \matpic{score}{7.05,-6.85}{2.35}{1.4}{ink}{$QK^\top/\sqrt{d_h}$}{$L\times mL$}
+  \node[op,text width=1.55cm] (sm) at (10.1,-6.85) {逐行 softmax\\每行权重和为 $1$};
+  \matpic{weights}{13.8,-6.85}{2.7}{1.4}{refline}{$A$}{$L$ 个目标块 $\times\ mL$ 个参考块}
+  \draw[arr] (kt)--(score); \draw[arr] (score)--(sm); \draw[arr] (sm)--(weights);
+  \draw[refline,line width=1.5pt] ($(weights.south west)!.2!(weights.north west)$)--($(weights.south east)!.2!(weights.north east)$);
+  \matpic{a2}{2.0,-10.1}{2.7}{1.4}{refline}{$A$}{$L\times mL$}
+  \node[font=\large] at (4.05,-10.1) {$\times$};
+  \matpic{val}{5.45,-10.1}{1.0}{2.1}{refline}{$V$}{$mL\times d_h$}
+  \matpic{readout}{8.05,-10.1}{1.1}{1.4}{genline}{$O$}{$O=AV$\\$L\times d_h$}
+  \node[op,text width=2.1cm] (merge) at (11.2,-10.1) {多个头沿特征维拼接\\线性映射到 $d$\\回到 A 的门控与残差};
+  \matpic{outmat}{14.8,-10.1}{1.25}{1.4}{genline}{$L\times d$}{各目标块读取后的特征}
+  \draw[cond,rounded corners=2pt] (weights.south)--(13.8,-8.55)--(2,-8.55)--(a2.north);
+  \draw[arr] (val)--(readout); \draw[arr] (readout)--(merge); \draw[arr] (merge)--(outmat);
+  \node[tinylabel,anchor=west] at (.2,-12.04)
+    {一行权重对应一个目标块；一列对应一个参考块。重排参考时，权重列与 $V$ 的行一起重排，加权结果不变。};
+\end{tikzpicture}
+\figcaption{图 3：DiT 内部与交叉注意力。$+$ 为残差相加；$\times$ 为矩阵乘法；门控为逐特征相乘。}
+\end{center}
+
+时间条件采用 AdaLN-Zero：对每个子层输入 $Z$，计算
+$\operatorname{AdaLN}(Z,t)=(1+a(t))\odot\operatorname{LN}(Z)+b(t)$，
+再将子层结果乘以门控向量 $g(t)$ 后加回 $Z$。
+$a,b,g\in\mathbb R^d$ 在目标块之间共享，三个子层各用一组；产生这些向量的最后一个线性层零初始化。
+输出头采用时间调节的层归一化和 $d\to p^2$ 线性映射，再按块位置还原速度图。
+
+交叉注意力的单头计算为
+\[
+ Q=\operatorname{AdaLN}(Z,t)W_Q,\quad
+ K=\operatorname{LN}(R)W_K,\quad V=\operatorname{LN}(R)W_V,\qquad
+ O=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
+\]
+其中 $Z$ 是该交叉注意力子层的输入，$d_h$ 是每个注意力头的维数。多个头的结果拼接后经线性映射，再做门控及残差相加。
+$Q$ 来自目标生成分支；$K,V$ 来自参考分支。层归一化均只沿每个块的特征维进行。
+
+\newpage
+\subsection{参考对顺序无关}
+每对独立编码；图内位置随该对特征一起移动。参考特征合并后，不再加入序列位置编码，也不使用按参考顺序限制读取的遮罩。
+设 $P$ 表示参考对重排对应的行置换，则 $K'=PK$、$V'=PV$，且
+\[
+ \operatorname{softmax}\!\left(\frac{Q(PK)^\top}{\sqrt{d_h}}\right)PV
+ =\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
+\]
+因此参考对重排不改变预测速度；固定初始噪声和积分步骤后，最终输出也不变（允许浮点计算误差）。
+这不允许单独打乱样本序列或楷体序列。若用补齐条目组成批次，交叉注意力必须屏蔽这些条目。
+
+\subsection{流匹配：训练与生成}
+灰度值统一映射到 $[-1,1]$。训练时，$H_\star$ 是同一书写者的目标手写真值，仅用于构造训练状态和监督目标；它不是参考输入。
+取 $t\sim\mathcal U(0,1)$，独立噪声 $\epsilon\sim\mathcal N(0,I)$，定义
+\[
+ x_t=(1-t)\epsilon+tH_\star,\qquad
+ u=H_\star-\epsilon,\qquad
+ \mathcal L=\mathbb E\!\left[\frac{1}{n^2}\left\|v_\theta(x_t,t,K_\star,R)-u\right\|_F^2\right].
+\]
+网络预测从噪声走向真值的速度 $u$。参考编码器与 DiT 联合训练；生成时固定 $R,K_\star$，从 $x_0=\epsilon$ 出发，求解
+\[
+ \frac{dx_t}{dt}=v_\theta(x_t,t,K_\star,R),\qquad t:0\longrightarrow1.
+\]
+首版采用图 1 的等步长 Euler 更新，$\Delta t=1/J$，共 $J$ 步；只在最后裁剪到 $[-1,1]$，再映射回灰度范围。
+图像边长 $n$、块边长 $p$、特征维数 $d$、层数 $B_E,B$、注意力头数、前馈网络宽度及步数 $J$ 尚待实验确定。
+
+
+\begin{center}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \draw[panel] (-.1,.45) rectangle (16.5,-6.15);
+  \node[stitle] at (.15,.05) {训练时的数据形状：同一份噪声同时构造 $x_t$ 与目标速度 $u$};
+  \matpic{gt}{1.2,-1.7}{1.15}{1.15}{outline}{$H_\star$}{目标手写真值}
+  \matpic{eps}{1.2,-4.35}{1.15}{1.15}{ink}{$\epsilon$}{独立高斯噪声}
+  \node[op,text width=2.25cm] (mix) at (4.55,-1.7) {线性插值\\$(1-t)\epsilon+tH_\star$};
+  \node[op,text width=2.25cm] (diff) at (4.55,-4.35) {逐像素相减\\$H_\star-\epsilon$};
+  \matpic{trainx}{7.5,-1.7}{1.0}{1.0}{genline}{$x_t$}{$n\times n$}
+  \matpic{trainu}{10.3,-4.35}{1.1}{1.1}{outline}{$u$}{监督目标：$n\times n$}
+  \node[op,text width=2.0cm] (net) at (10.3,-1.7) {速度网络 $v_\theta$\\条件：$t,K_\star,R$};
+  \matpic{predv}{14.8,-1.7}{1.1}{1.1}{outline}{$\widehat v_t$}{预测速度：$n\times n$}
+  \node[op,text width=2.0cm] (loss) at (14.8,-4.35) {逐像素平方误差\\全图平均为 MSE};
+  \draw[arr] (gt)--(mix); \draw[arr] (eps)--(diff);
+  \draw[route] (gt.east)--(2.5,-1.7)--(2.5,-3.95)--([yshift=4mm]diff.west);
+  \draw[route,preaction={draw=papergray,line width=3pt,-}] (eps.east)--(2.2,-4.35)--(2.2,-2.1)--([yshift=-4mm]mix.west);
+  \draw[arr] (mix)--(trainx); \draw[arr] (trainx)--(net); \draw[arr] (net)--(predv);
+  \draw[arr] (diff)--(trainu); \draw[arr] (trainu)--(loss);
+  \draw[route] (predv.east)--(15.85,-1.7)--(15.85,-3.2)--(14.8,-3.2)--(loss.north);
+  \node[tinylabel,anchor=west] at (.2,-5.75) {这是一张速度场的监督图；不把真值 $H_\star$ 当作参考输入，也不增加自编码器或额外损失。};
+\end{tikzpicture}
+\figcaption{图 4：流匹配训练数据流。与图 1C 的生成流程区分；训练目标和网络结构均未改变。}
+\end{center}
+
+\section{未来可能方向}
+初版灰度模型效果满足要求后，再考虑将全部输入和输出扩展为 $n\times n$ 的三通道 RGB 图像。
+粗细、直曲及火焰字体等风格变化另作后续实验；改为 RGB 本身不保证这些能力，其中粗细、直曲也可在灰度图中研究。
+
+\end{document}

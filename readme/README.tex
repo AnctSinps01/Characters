@@ -1,0 +1,653 @@
+% !TeX program = xelatex
+\documentclass[UTF8,fontset=fandol,zihao=5,a4paper]{ctexart}
+\usepackage[margin=20mm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,tabularx,array}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,positioning}
+\definecolor{diagink}{HTML}{263445}
+\definecolor{diagblue}{HTML}{3A729B}
+\definecolor{diagpurple}{HTML}{8864AB}
+\definecolor{diaggreen}{HTML}{39816E}
+\definecolor{diagorange}{HTML}{B97C31}
+\tikzset{
+  flow/.style={-{Latex[length=2mm]},draw=diagink,line width=.8pt,rounded corners=2pt},
+  refarrow/.style={flow,draw=diagblue},
+  queryarrow/.style={flow,draw=diagpurple},
+  condition/.style={flow,draw=diaggreen,dashed},
+  panel/.style={draw=diagink!18,fill=diagink!2,rounded corners=3pt},
+  block/.style={draw=diagink!65,fill=white,rounded corners=2pt,align=center,
+    font=\small,inner sep=5pt,minimum height=1cm},
+  refblock/.style={block,draw=diagblue,fill=diagblue!6},
+  queryblock/.style={block,draw=diagpurple,fill=diagpurple!7},
+  genblock/.style={block,draw=diagorange,fill=diagorange!7},
+  styleblock/.style={block,draw=diaggreen,fill=diaggreen!7},
+  note/.style={font=\scriptsize,align=center,text=diagink},
+  paneltitle/.style={font=\small\bfseries,anchor=west,text=diagink},
+  plus/.style={circle,draw=diagink,fill=white,inner sep=0pt,minimum size=.4cm,font=\small}
+}
+
+% Vertical strips are d-dimensional tokens; drawn counts are schematic.
+\definecolor{groupone}{HTML}{397BAC}
+\definecolor{grouptwo}{HTML}{3A9B8F}
+\definecolor{groupthree}{HTML}{AD7867}
+\newCJKfontfamily\yahei{Microsoft YaHei}
+\newcommand{\vtokenbank}[7]{%
+  \pgfmathsetmacro{\bankwidth}{#4*.18}
+  \node[inner sep=0pt,minimum width=\bankwidth cm,minimum height=#3cm] (#1) at (#2) {};
+  \foreach \k in {1,...,#4}{
+    \pgfmathsetmacro{\dx}{(\k-(#4+1)/2)*.18}
+    \node[draw=#5,fill=#5!15,minimum width=.105cm,minimum height=#3cm,inner sep=0pt,line width=.5pt]
+      (#1-\k) at ($(#1.center)+(\dx,0)$) {};
+    \foreach \f in {.2,.4,.6,.8}{
+      \draw[#5!45,line width=.2pt]
+      ($(#1-\k.south west)!\f!(#1-\k.north west)$)--
+      ($(#1-\k.south east)!\f!(#1-\k.north east)$);
+    }
+  }
+  \node[font=\scriptsize,anchor=west,align=left,inner sep=1pt] at ($(#1.east)+(.08,0)$) {#6};
+  \node[font=\scriptsize,anchor=east,align=right,inner sep=1pt] at ($(#1.west)+(-.08,0)$) {#7};
+}
+\newcommand{\vattention}[5]{%
+  \foreach \a in {1,...,#2}{
+    \foreach \b in {1,...,#4}{
+      \draw[#5!36,line width=.3pt] (#1-\a.south)--(#3-\b.north);
+    }
+  }
+  \draw[-{Latex[length=1.15mm]},#5!85,line width=.6pt] (#1-1.south)--(#3-1.north);
+  \draw[-{Latex[length=1.15mm]},#5!85,line width=.6pt] (#1-#2.south)--(#3-#4.north);
+}
+\newcommand{\vqueries}[4]{%
+  \foreach \k in {1,...,#2}{
+    \draw[-{Latex[length=1.2mm]},#4,line width=.6pt] (#1-\k.south)--(#3-\k.north);
+  }
+}
+\newcommand{\glyphsample}[7]{%
+  \node[draw=#4!65,fill=white,minimum width=.66cm,minimum height=.72cm,inner sep=0pt]
+    (#1) at (#2) {};
+  \node[font=\large#7,text=#4,rotate=#6] at (#1.center) {#3};
+  \foreach \f in {.25,.5,.75}{
+    \draw[#4!18,line width=.2pt]
+      ($(#1.south west)!\f!(#1.south east)$)--($(#1.north west)!\f!(#1.north east)$);
+    \draw[#4!18,line width=.2pt]
+      ($(#1.south west)!\f!(#1.north west)$)--($(#1.south east)!\f!(#1.north east)$);
+  }
+  \node[font=\scriptsize,anchor=south,inner sep=1pt] at (#1.north) {#5};
+}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\linespread{1.12}
+\setlength{\abovedisplayskip}{7pt}
+\setlength{\belowdisplayskip}{7pt}
+\ctexset{section={format=\large\bfseries,beforeskip=12pt,afterskip=6pt},
+  subsection={format=\normalsize\bfseries,beforeskip=9pt,afterskip=4pt}}
+\newcommand{\R}{\mathbb R}
+\newcommand{\LN}{\operatorname{LN}}
+\newcommand{\SA}{\operatorname{SA}}
+\newcommand{\CA}{\operatorname{CA}}
+\newcommand{\FFN}{\operatorname{FFN}}
+\newcommand{\MHA}{\operatorname{MHA}}
+\newcommand{\AdaLN}{\operatorname{AdaLN}}
+\pagestyle{plain}
+
+\begin{document}
+\begin{center}
+{\LARGE\bfseries Glyph2Hand}\par
+\vspace{4pt}
+{\large 分层参考编码与条件流匹配：架构图与设计说明}\par
+\vspace{3pt}
+{\small 2026 年 10 月 4 日\quad 三阶段参考编码与标准字起点 flow}
+\end{center}
+
+\section{任务、范围与核心假设}
+
+根据同一书写者的若干参考字，生成指定汉字的手写图。输入为
+\[
+\mathcal C=\{(H_i,K_i)\}_{i=1}^{N},\qquad K_\star,
+\]
+其中 $H_i$ 是参考手写图，$K_i$ 是同一个汉字的标准字体图；$K_\star$ 是目标汉字的标准字体图。
+本版 $K_i,K_\star$ 统一使用微软雅黑（Microsoft YaHei）；符号 $K$ 仅作为标准字图的记号。
+图中的手写侧用楷书字形作示意，不代表训练样本。
+一组指一个对应的 $(H_i,K_i)$，不是一张独立图像。所有参考手写图来自同一书写者，$N\geq1$。
+输出 $\widehat H_\star$ 应同时保持目标字内容和参考笔迹风格。
+训练真值 $H_\star$ 不进入参考集合，也不作为生成网络的独立条件输入。
+
+本版参考分支采用以下顺序：
+\begin{enumerate}
+\item 每组独立编码，在整字上下文中理解局部形状以及手写与标准字之间的关系。
+\item 每组压缩为 $Z$ 个语义描述 token，表示从该参考字中观察到的写法证据。
+\item 由 $M$ 个可学习查询初始化风格 token，经过 $B_{\rm set}$ 个集合汇总块；每层依次用交叉注意力读取全部 $NZ$ 个描述、在 $M$ 个风格 token 间做自注意力，再经过前馈网络。
+\end{enumerate}
+
+\textbf{核心假设：}组内结构已被编码进 $Z$ 个描述，后续融合可以主要依据描述内容，
+不再显式依赖原始 patch 的分组关系。这不意味着字符内容被完全消除，也不保证每个 token 对应一种笔画。
+笔画、部件及其位置仍可能是解释某种写法所必需的信息。
+这一假设和压缩容量需要通过实验验证；当前文档与 \texttt{src} 中的模型骨架保持一致，尚无训练或效果结论。
+
+生成分支暂按“目标标准字加噪声作为起点”的像素空间 flow 写出完整公式。
+噪声强度、各层数和 token 数量均为可调实验超参数，尚未由实验确定。
+
+
+
+\clearpage
+% Give the overview its own wider page area and larger labels.
+\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}
+\section*{架构总览\quad 参考集合压缩与条件 flow}
+\begingroup
+\renewcommand{\tiny}{\fontsize{6}{7}\selectfont}
+\renewcommand{\scriptsize}{\fontsize{8}{9}\selectfont}
+\begin{center}
+\resizebox{!}{238mm}{%
+\begin{tikzpicture}[x=1.18cm,y=1cm,
+  tinyblock/.style={draw=diagink!50,fill=white,rounded corners=2pt,font=\scriptsize,align=center,
+    inner sep=3pt,minimum height=.38cm},
+  timelink/.style={queryarrow,dashed,line width=.65pt},
+  residual/.style={flow,draw=diagink!50,line width=.6pt},
+  gate/.style={tinyblock,draw=diagpurple,fill=diagpurple!8,minimum width=2.1cm,inner sep=2pt},
+  add/.style={plus,minimum size=.32cm,font=\scriptsize}]
+\path[use as bounding box] (0,.42) rectangle (16,-25.5);
+\node[font=\small\bfseries,text=diagblue,anchor=west] at (.6,.23)
+  {A\ 组内编码 \quad B\ 每组压缩 \qquad $N$ 组共享编码器与 $Q_Z$};
+% Reference pairs, three independent columns.
+\foreach \idx/\cx/\glyph/\col in {1/2.5/永/groupone,2/6.95/水/grouptwo,N/13.7/木/groupthree}{
+  \fill[\col!3,rounded corners=4pt] (\cx-2.18,-.12) rectangle (\cx+2.18,-5.35);
+  \node[font=\scriptsize,text=diagink] at (\cx,-.28) {第 $\idx$ 组：手写 / 微软雅黑};
+  \glyphsample{h\idx}{\cx-.48,-1.16}{\glyph}{\col}{$H_{\idx}$}{-6}{\kaishu}
+  \glyphsample{k\idx}{\cx+.48,-1.16}{\glyph}{diagink}{$K_{\idx}$}{0}{\yahei}
+  \draw[\col!70,line width=.55pt] (h\idx.south)--(\cx-.48,-1.6)--(\cx+.48,-1.6)--(k\idx.south);
+  \vtokenbank{x\idx}{\cx,-2.04}{.5}{5}{\col}{$X_{\idx}$\\$L\times d$}{}
+  \draw[flow,line width=.55pt] (\cx,-1.6)--(x\idx.north);
+  \node[font=\tiny,text=diagink,anchor=west] at (\cx+.55,-1.66) {patch + 位置};
+  \vtokenbank{r\idx}{\cx,-3.3}{.5}{5}{\col}{$R_{\idx}$\\$L\times d$}{}
+  \vattention{x\idx}{5}{r\idx}{5}{\col}
+  \node[font=\scriptsize,text=diagink,anchor=west] at (\cx+.65,-2.67) {SA $\times B_{\rm local}$};
+  \vtokenbank{q\idx}{\cx-1.18,-4.07}{.5}{3}{diagpurple}{}{$Q_Z$\\$Z\times d$}
+  \vtokenbank{u\idx}{\cx,-4.97}{.5}{3}{\col}{$U_{\idx}$\\$Z\times d$}{}
+  \vattention{r\idx}{5}{u\idx}{3}{\col}
+  \vqueries{q\idx}{3}{u\idx}{diagpurple}
+  \node[font=\tiny,text=diagpurple] at (\cx-.6,-4.12) {Q};
+  \node[font=\scriptsize,text=diagink,anchor=west] at (\cx+.55,-4.12) {K,V};
+  \node[font=\scriptsize,text=diagink,anchor=west] at (\cx+.55,-4.49) {CA};
+}
+\node[font=\Large\bfseries,text=diagink!80,inner sep=0pt] at (10.325,-2.75) {$\boldsymbol{\cdots}$};
+% Concatenate the group summaries along the token dimension.
+\node[font=\small\bfseries,text=diaggreen,anchor=west] at (.6,-5.82) {C\ 集合汇总};
+\draw[draw=diagink!30,fill=white,rounded corners=2pt] (6.5,-5.87) rectangle (9.42,-6.65);
+\vtokenbank{c1}{7,-6.26}{.55}{3}{groupone}{}{}
+\vtokenbank{c2}{7.77,-6.26}{.55}{3}{grouptwo}{}{}
+\vtokenbank{cN}{8.98,-6.26}{.55}{3}{groupthree}{}{}
+\node[font=\scriptsize,text=diagink] at (8.36,-6.26) {$\cdots$};
+\node[font=\scriptsize,anchor=west,align=left] at (9.55,-6.26) {$U$\\$NZ\times d$};
+\draw[flow,draw=groupone,line width=.65pt] (u1.south)--(2.5,-5.58)--(c1.north);
+\draw[flow,draw=grouptwo,line width=.65pt] (u2.south)--(c2.north);
+\draw[flow,draw=groupthree,line width=.65pt] (uN.south)--(13.7,-5.58)--(cN.north);
+\node[font=\scriptsize,fill=white,inner sep=1pt] at (11.2,-5.81) {沿 token 维拼接};
+\vtokenbank{qm}{4.65,-8.05}{.55}{4}{diagpurple}{}{$S^{(0)}=Q_M$\\$M\times d$}
+\draw[draw=diaggreen!55,fill=diaggreen!3,rounded corners=3pt]
+  (6.05,-7.16) rectangle (10.2,-8.82);
+\node[font=\scriptsize\bfseries,text=diaggreen] at (8.125,-7.42) {集合汇总模块};
+\node[tinyblock,draw=diaggreen,fill=white,minimum width=.9cm] (setca) at (6.85,-8.08) {CA};
+\node[tinyblock,draw=diaggreen,fill=white,minimum width=.9cm] (setsa) at (8.12,-8.08) {SA};
+\node[tinyblock,draw=diaggreen,fill=white,minimum width=1.05cm] (setffn) at (9.43,-8.08) {FFN};
+\draw[queryarrow,line width=.65pt] (qm.east)--node[above,font=\tiny] {Q}(setca.west);
+\draw[flow,draw=diaggreen,line width=.65pt] (setca.east)--(setsa.west);
+\draw[flow,draw=diaggreen,line width=.65pt] (setsa.east)--(setffn.west);
+\draw[condition,line width=.7pt] (7.96,-6.65)--(setca.north);
+\node[font=\tiny,text=diaggreen,anchor=east] at (7.63,-6.9) {$U$：K,V};
+\node[font=\tiny,text=diaggreen] at (8.12,-8.61) {$\times B_{\rm set}$；每层独立参数};
+\vtokenbank{style}{12.15,-8.08}{.6}{4}{diaggreen}{$S=S^{(B_{\rm set})}$\\$M\times d$}{}
+\draw[flow,draw=diaggreen,line width=.7pt] (setffn.east)--(style.west);
+\node[font=\tiny,text=diagink,align=left,anchor=west] at (10.55,-6.87)
+  {$U$ 不更新、不做 SA\\每层 CA 都读取同一份 $U$};
+% Generation: only SA and FFN use the block's time modulation.
+\draw[diagink!18,line width=.55pt] (.6,-9.08)--(15.5,-9.08);
+\node[font=\small\bfseries,text=diagorange,anchor=west] at (.6,-9.46)
+  {生成：$L=(n/p)^2$ 个目标 token，全程保留空间位置};
+\draw[draw=diagorange!50,fill=diagorange!2,rounded corners=4pt] (6.12,-11.1) rectangle (10.72,-20.67);
+\node[font=\scriptsize,text=diagorange,anchor=west,align=left] at (11,-11.55) {DiT block\\$\times B_{\rm gen}$};
+\glyphsample{xt}{7.45,-10.55}{沐}{diagorange}{$x_t$}{-3}{\kaishu}
+\glyphsample{kg}{8.55,-10.55}{沐}{diagink}{$K_\star$}{0}{\yahei}
+\draw[diagorange!35,line width=.6pt] (7.18,-10.36)--(7.7,-10.75);
+\draw[diagorange!35,line width=.6pt] (7.2,-10.76)--(7.68,-10.34);
+\node[font=\scriptsize,anchor=east] at (6.65,-10.31) {$x_0=K_\star+\sigma\epsilon$};
+\draw[timelink] (6.2,-10.55)--(xt.west);
+\draw[diagorange!70,line width=.55pt] (xt.south)--(7.45,-11.1)--(8.55,-11.1)--(kg.south);
+\vtokenbank{t0}{8,-11.58}{.46}{5}{diagorange}{$T$\\$L\times d$}{}
+\draw[flow,line width=.55pt] (8,-11.1)--(t0.north);
+\node[font=\tiny,text=diagink,anchor=west] at (8.7,-10.91) {patch：$2p^2\to d$};
+% Shared time embedding, one separate 6d projection per block.
+\node[queryblock,font=\scriptsize,minimum height=.33cm,inner sep=2pt] (time) at (2.8,-9.97) {$t\in[0,1]$};
+\node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (tembed) at (2.8,-10.62) {sin/cos + 两层 MLP};
+\draw[timelink] (time)--(tembed);
+\vtokenbank{te}{2.8,-11.27}{.38}{1}{diagpurple}{$e(t)\in\mathbb R^d$}{}
+\draw[timelink] (tembed.south)--(te.north);
+\node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (mod6) at (2.8,-12.08)
+ {SiLU + Linear\\$d\to6d$；零初始化};
+\draw[timelink] (te.south)--(mod6.north);
+\node[font=\tiny,text=diagpurple,align=center] at (2.8,-12.88)
+ {每个 block 独立映射\\SA / FFN 各一组 $(a,b,g)$};
+\node[draw=diagpurple!45,fill=diagpurple!3,rounded corners=2pt,
+  font=\scriptsize,text=diagpurple,align=left,inner sep=5pt] at (3.3,-15.45)
+ {$g$：逐通道残差门控\\
+  $g(t)\in\mathbb R^d$，所有 token 共用\\
+  $h_{ij}\mapsto g_j(t)\,h_{ij}$\\
+  $h$ 为 SA / FFN 的输出\\
+  无 sigmoid；初始 $g=0$};
+% SA: AdaLN, attention, gate, residual.
+\node[tinyblock,draw=diagpurple,minimum width=1.7cm] (adsa) at (8,-12.2) {AdaLN};
+\draw[flow,line width=.55pt] (t0.south)--(adsa.north);
+\vtokenbank{sain}{8,-12.8}{.4}{5}{diagorange}{}{}
+\vtokenbank{saout}{8,-13.68}{.4}{5}{diagorange}{}{}
+\draw[flow,line width=.55pt] (adsa.south)--(sain.north);
+\vattention{sain}{5}{saout}{5}{diagorange}
+\node[font=\scriptsize,anchor=west] at (8.8,-13.24) {SA};
+\node[font=\tiny,text=diagink,anchor=west] at (8.8,-13.68) {$h_{\rm SA}$};
+\node[gate] (gsa) at (8,-14.11) {$g_{\rm SA}\odot h_{\rm SA}$};
+\node[font=\scriptsize,text=diagpurple,anchor=west] at (9.1,-14.11) {逐通道乘法};
+\node[add] (asa) at (8,-14.59) {$+$};
+\draw[flow,line width=.55pt] (saout.south)--(gsa.north);
+\draw[flow,line width=.55pt] (gsa.south)--(asa.north);
+\draw[residual] (t0.west)--(6.5,-11.58)--(6.5,-14.59)--(asa.west);
+\draw[timelink] (mod6.east)--(5.3,-12.08)--(5.3,-12.2)--(adsa.west);
+\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (6.06,-11.98) {$a_{\rm SA},b_{\rm SA}$};
+\draw[timelink] (5.3,-12.2)--(5.3,-14.11)--(gsa.west);
+\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (6.85,-13.91) {$g_{\rm SA}$};
+% CA: ordinary pre-LN and residual, no additional time modulation.
+\node[tinyblock,minimum width=1.7cm] (lnca) at (8,-15.13) {LN};
+\draw[flow,line width=.55pt] (asa.south)--(lnca.north);
+\vtokenbank{cain}{8,-15.69}{.4}{5}{diagorange}{}{}
+\vtokenbank{caout}{8,-16.78}{.4}{5}{diagorange}{}{}
+\draw[flow,line width=.55pt] (lnca.south)--(cain.north);
+\vqueries{cain}{5}{caout}{diagorange}
+\vtokenbank{smemory}{12.5,-15.66}{.6}{4}{diaggreen}{$S$\\$M\times d$}{}
+\draw[condition,line width=.8pt] (style.south)--(12.15,-9.18)--(12.5,-9.18)--(smemory.north);
+\vattention{smemory}{4}{caout}{5}{diaggreen}
+\node[font=\scriptsize,text=diaggreen] at (11.1,-15.56) {LN $\to$ K,V};
+\node[font=\tiny,text=diagorange] at (7.25,-16.19) {Q};
+\node[font=\scriptsize,fill=diagorange!2,inner sep=1pt,anchor=west] at (8.8,-16.19) {CA};
+\node[font=\tiny,text=diagink,align=center] at (12.5,-17.28) {普通 LN + 残差\\CA 无独立时间调节};
+\node[add] (aca) at (8,-17.3) {$+$};
+\draw[flow,line width=.55pt] (caout.south)--(aca.north);
+\fill[diagink!70] (8,-14.84) circle (.025);
+\draw[residual] (8,-14.84)--(6.5,-14.84)--(6.5,-17.3)--(aca.west);
+% FFN: same standard AdaLN-Zero pattern as SA.
+\node[tinyblock,draw=diagpurple,minimum width=1.7cm] (adffn) at (8,-17.95) {AdaLN};
+\node[tinyblock,minimum width=1.7cm] (ffn) at (8,-18.6) {逐 token FFN};
+\node[gate] (gffn) at (8,-19.16) {$g_{\rm FFN}\odot h_{\rm FFN}$};
+\node[font=\scriptsize,text=diagpurple,anchor=west] at (9.1,-19.16) {逐通道乘法};
+\node[add] (affn) at (8,-19.72) {$+$};
+\draw[flow,line width=.55pt] (aca.south)--(adffn.north);
+\draw[flow,line width=.55pt] (adffn.south)--(ffn.north);
+\draw[flow,line width=.55pt] (ffn.south)--(gffn.north);
+\node[font=\tiny,text=diagink,anchor=west] at (9.1,-18.78) {$h_{\rm FFN}$};
+\draw[flow,line width=.55pt] (gffn.south)--(affn.north);
+\fill[diagink!70] (8,-17.61) circle (.025);
+\draw[residual] (8,-17.61)--(6.5,-17.61)--(6.5,-19.72)--(affn.west);
+\draw[timelink] (mod6.west)--(1.3,-12.08)--(1.3,-17.95)--(adffn.west);
+\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (5.65,-17.74) {$a_{\rm FFN},b_{\rm FFN}$};
+\draw[timelink] (1.3,-17.95)--(1.3,-19.16)--(gffn.west);
+\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (5.65,-18.94) {$g_{\rm FFN}$};
+\vtokenbank{tout}{8,-20.31}{.46}{5}{diagorange}{$L\times d$}{}
+\draw[flow,line width=.55pt] (affn.south)--(tout.north);
+% Final head: independent 2d time modulation and one shared patch projection.
+\node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (mod2) at (2.8,-21.4)
+ {SiLU + Linear\\$d\to2d$；零初始化};
+\draw[timelink] (te.west)--(.85,-11.27)--(.85,-21.4)--(mod2.west);
+\node[tinyblock,minimum width=2.5cm] (head) at (8,-21.4) {AdaLN\\共享线性层 $d\to p^2$};
+\draw[flow,line width=.55pt] (tout.south)--(head.north);
+\draw[timelink] (mod2.east)--node[above,font=\tiny,text=diagpurple] {$a_{\rm out},b_{\rm out}$}(head.west);
+\vtokenbank{vpatch}{8,-22.24}{.5}{5}{diaggreen}{$L\times p^2$}{}
+\draw[flow,line width=.55pt] (head.south)--(vpatch.north);
+\node[draw=diaggreen!75,fill=diaggreen!4,minimum width=.72cm,minimum height=.72cm,inner sep=0pt] (vel) at (8,-23.26) {};
+\foreach \xx in {-.36,-.12,.12,.36}{
+ \draw[diaggreen!50,line width=.35pt] ($(vel.center)+(\xx,-.36)$)--($(vel.center)+(\xx,.36)$);
+ \draw[diaggreen!50,line width=.35pt] ($(vel.center)+(-.36,\xx)$)--($(vel.center)+(.36,\xx)$);
+}
+\fill[diaggreen!50] ($(vel.center)+(-.12,-.12)$) rectangle ($(vel.center)+(.12,.12)$);
+\fill[diaggreen!25] ($(vel.center)+(-.36,.12)$) rectangle ($(vel.center)+(-.12,.36)$);
+\draw[flow,line width=.55pt] (vpatch.south)--node[right,font=\tiny] {按位置拼回}(vel.north);
+\node[font=\scriptsize,anchor=east,align=right] at (7.46,-23.26) {$\widehat v_t$\\$n\times n$};
+\node[add] (euler) at (10.6,-23.26) {$+$};
+\draw[flow,draw=diaggreen,line width=.65pt] (vel.east)--node[above,font=\scriptsize] {$\Delta t$}(euler.west);
+\node[font=\scriptsize] (xprev) at (10.6,-22.35) {$x_t$};
+\draw[flow,draw=diagorange,line width=.6pt] (xprev.south)--(euler.north);
+\glyphsample{final}{13.05,-23.26}{沐}{diaggreen}{$\widehat H_\star$}{-6}{\kaishu}
+\draw[flow,draw=diaggreen,line width=.65pt] (euler.east)--node[above,font=\scriptsize] {$t=1$}(final.west);
+% The updated state feeds back to x_t; crossings have no junction.
+\draw[flow,draw=diagink!55,line width=.6pt,preaction={draw=white,line width=2pt}]
+ (euler.south)--(10.6,-24.08)--(15.65,-24.08)--(15.65,-9.85)--(6.95,-9.85)--(6.95,-10.55)--(xt.west);
+\node[font=\scriptsize,text=diagink,anchor=east] at (10.35,-24.08) {未到终点：$x_{t+\Delta t}\to x_t$};
+% Visual legend and exact meaning of the modulation.
+\draw[diagink!18,line width=.55pt] (.6,-24.55)--(15.5,-24.55);
+\vtokenbank{legend}{1.0,-25.02}{.4}{1}{diagblue}{$1$ 个 $d$ 维 token}{}
+\node[font=\scriptsize,text=diagpurple,anchor=west] at (4.5,-24.87) {紫色：查询参数 / 时间调节};
+\node[font=\scriptsize,anchor=west] at (4.5,-25.21) {$\mathrm{AdaLN}(T)=(1+a)\odot\mathrm{LN}(T)+b$};
+\node[font=\scriptsize,text=diagink,align=left,anchor=west] at (12,-25.0) {$\odot$：逐元素乘法\\$+$：残差相加};
+\end{tikzpicture}}
+\end{center}
+\endgroup
+{\small 条带数量为示意；实际数量以 $L,Z,M,NZ$ 为准。连线表示注意力读取关系；QKV 在 MHA 内独立投影。
+标准字使用微软雅黑，手写侧字形仅作示意。生成主干的 SA、FFN 采用 AdaLN-Zero，生成 CA 采用普通 LN 与残差；
+集合汇总的 CA、SA、FFN 均采用普通前置 LN 与残差。参考逐组编码的归一化、残差及 FFN 从略；最终字图经过灰度映射。}
+\restoregeometry
+\section{统一符号与数据形状}
+
+所有图像先映射至 $[-1,1]$，采用 $n\times n$ 单通道灰度图。
+块边长为 $p$，要求 $p\mid n$。每边块数为 $q=n/p$，每组块数为 $L=q^2$。
+这里使用 $q$ 表示每边块数，避免与 flow 状态 $x_t$ 混淆。
+下表省略批次维；每行特征都是一个 $d$ 维 token。
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+符号 & 形状／含义 & 职责 \\
+\midrule
+$N$ & 参考对数量 & 随输入变化，至少为 $1$ \\
+$Z$ & 每组描述数量 & 单字证据容量，固定超参数 \\
+$M$ & 最终风格数量 & 整个参考集合的输出容量，固定超参数 \\
+$B_{\rm set}$ & 集合汇总层数 & 每层依次执行 CA、SA、FFN；代码默认 $2$，至少为 $1$ \\
+$X_i$ & $L\times d$ & 第 $i$ 组的初始 patch 特征 \\
+$R_i$ & $L\times d$ & 经过组内注意力的空间特征 \\
+$Q_Z$ & $Z\times d$ & 所有组共用的可学习压缩查询 \\
+$U_i$ & $Z\times d$ & 第 $i$ 组的语义描述 \\
+$U$ & $NZ\times d$ & 全部组描述沿行拼接，直接提供键和值 \\
+$Q_M$ & $M\times d$ & 可学习的集合汇总查询 \\
+$S$ & $M\times d$ & 最终风格条件 \\
+$T^{(b)}$ & $L\times d$ & 生成主干第 $b$ 层的目标特征 \\
+$x_t,\widehat v_t$ & $n\times n\times1$ & 当前生成状态、预测像素速度 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+$Z$ 和 $M$ 都表示 token 数量，不表示特征维度；它们不必相等，也没有预设大小关系。
+$Q_Z,Q_M$ 是训练得到的模型参数，不是每次生成时重新采样的随机量。
+
+\section{参考分支：从成对字图到固定风格表示}
+
+\subsection{注意力块的具体约定}
+
+为使下文公式没有歧义，本文采用带残差、前置层归一化和前馈网络的注意力块。
+交叉注意力块 $\CA(A,B)$ 由 $A$ 提供查询，$B$ 提供键和值：
+\begin{align*}
+\widetilde A&=A+\MHA(\LN_A(A),\LN_B(B),\LN_B(B)),\\
+\CA(A,B)&=\widetilde A+\FFN(\LN_F(\widetilde A)).
+\end{align*}
+自注意力块 $\SA(A)$ 为
+\begin{align*}
+\widetilde A&=A+\MHA(\LN_A(A),\LN_A(A),\LN_A(A)),\\
+\SA(A)&=\widetilde A+\FFN(\LN_F(\widetilde A)).
+\end{align*}
+这里的 $\LN$ 是逐 token 的层归一化，不是 QKV 投影。
+$\MHA(X_Q,X_K,X_V)$ 的三个参数表示投影前的特征来源，
+模块内部再进行各头的 QKV 线性投影。以第 $h$ 个头为例，省略可选偏置：
+\begin{align*}
+Q_h&=X_QW_Q^{(h)},\qquad
+K_h=X_KW_K^{(h)},\qquad
+V_h=X_VW_V^{(h)},\\
+O_h&=\operatorname{softmax}\!\left(\frac{Q_hK_h^\top}{\sqrt{d_h}}\right)V_h,\\
+\MHA(X_Q,X_K,X_V)&=\operatorname{Concat}_h(O_h)W_O.
+\end{align*}
+$d_h$ 是每头维度，$W_O$ 是多头结果拼接后的输出投影。
+本稿的 $W_Q^{(h)},W_K^{(h)},W_V^{(h)}$ 分别参数化，不共享权重。
+因此自注意力中三个输入均为 $\LN_A(A)$，仅表示 Q、K、V 来自同一份特征，
+不施加投影后的 $Q_h=K_h=V_h$ 约束。
+同理，交叉注意力中键和值均来自 $\LN_B(B)$，也不表示 $K_h=V_h$。
+
+\textbf{与共享键值的区别：}在本稿所用的相同键值维度下，
+若将 K、V 投影及其偏置（如有）绑定，或直接令 $V_h=K_h$，
+才是显式约束投影后 $K=V$ 的另一种结构；本稿不采用该约束。
+上述 QKV 投影约定也适用于生成主干中的多头注意力。
+前馈网络暂用两层线性映射和 GELU；归一化仅沿特征维，不跨 token 或参考组。
+不同阶段、不同层拥有各自参数；只有明确说明的逐组操作共享参数。
+
+下文“注意力池化”采用 Set Transformer 的 PMA 思想：固定数量的可学习查询读取可变数量的输入。
+这里给出了本稿使用的具体块结构，不宣称逐项复现原论文的归一化和前馈配置。
+
+\subsection{阶段 A：组内分块与上下文编码}
+
+将一组 $H_i,K_i$ 沿通道拼接为 $n\times n\times2$。
+同位置的两个 $p\times p$ 小块一起展开，得到 $2p^2$ 维向量，再投影到 $d$ 维。
+这不是把手写和标准字混合平均，也不是分别产生两套无配对关系的 token。定义
+\[
+X_i=\operatorname{PatchEmbed}_{\mathrm{ref}}([H_i,K_i])+P_{xy}
+\in\R^{L\times d},\qquad
+R_i=E_{\mathrm{local}}(X_i).
+\]
+$P_{xy}\in\R^{L\times d}$ 为图内二维位置编码；暂用固定二维正弦余弦编码。
+$E_{\mathrm{local}}$ 由 $B_{\mathrm{local}}$ 层 $\SA$ 组成。
+每组的 $L$ 个 token 可以互相读取，但此阶段不读取其他参考组。
+所有组使用相同的分块投影、位置编码和编码器参数。
+
+这一阶段保留 $L$ 个空间位置。目的在于先获得带整字上下文的局部描述，为跨字比较提供依据；
+仅添加二维位置、然后直接把原始 patch 混合，不能完整表达哪些 patch 属于同一个字。
+组内编码也不保证自动学到可解释的笔画分类。
+
+\subsection{阶段 B：每组压缩为 \texorpdfstring{$Z$}{Z} 个语义描述}
+
+用同一套可学习查询 $Q_Z\in\R^{Z\times d}$ 独立读取各组：
+\[
+U_i=\CA_{\mathrm{local\ pool}}(Q_Z,R_i)\in\R^{Z\times d}.
+\]
+查询来自 $Q_Z$，键和值来自第 $i$ 组的 $R_i$。
+每个查询均可读取该组的全部 $L$ 个空间特征；输出位置对应查询槽位，不再对应固定图像块。
+各组之间共享 $Q_Z$ 和此注意力块的全部参数。
+
+本稿采用一次上述压缩，随后拼接各组描述，供 $M$ 个风格 token 在多层集合汇总中反复读取。
+压缩后的 $U_i$ 不再进行组内或跨组自注意力。
+压缩后不再保留 $R_i$ 到主干或最终池化的旁路，因而 $Z$ 是真实的信息瓶颈。
+
+相同查询槽位为跨字描述提供共同的学习起点，但不强制语义完全对齐。
+例如不能预先断言“第一个 token 永远表示横画”。
+这里的 $U_i$ 是来自单字的证据：有些写法在该字中没有出现，模型需要在后续集合融合中结合其他字。
+压缩不会自动实现内容与风格的严格解耦，也不要求每个描述能独立解释。
+
+\subsection{阶段 C：多层 CA--SA--FFN 汇总为 \texorpdfstring{$M$}{M} 个风格 token}
+
+将各组描述沿 token 维拼接，作为每个集合汇总层的固定键值来源：
+\[
+U=[U_1;\ldots;U_N]\in\R^{NZ\times d},\qquad
+S^{(0)}=Q_M\in\R^{M\times d}.
+\]
+设集合汇总深度为 $B_{\rm set}\geq1$，当前代码默认 $B_{\rm set}=2$。第 $b$ 层先由当前风格 token 读取 $U$，
+再在 $M$ 个风格 token 之间进行自注意力，最后执行逐 token 前馈网络：
+\begin{align*}
+C^{(b)}={}&S^{(b)}+\MHA_{\rm ca}^{(b)}\!\left(
+  \LN_q^{(b)}(S^{(b)}),\LN_u^{(b)}(U),\LN_u^{(b)}(U)\right),\\
+A^{(b)}={}&C^{(b)}+\MHA_{\rm sa}^{(b)}\!\left(
+  \LN_s^{(b)}(C^{(b)}),\LN_s^{(b)}(C^{(b)}),\LN_s^{(b)}(C^{(b)})\right),\\
+S^{(b+1)}={}&A^{(b)}+\FFN^{(b)}\!\left(\LN_f^{(b)}(A^{(b)})\right),
+\qquad b=0,\ldots,B_{\rm set}-1,\\
+S={}&S^{(B_{\rm set})}.
+\end{align*}
+每层拥有独立的 CA、SA、FFN 和归一化参数。CA 的单头注意力矩阵形状为
+$M\times NZ$，SA 的注意力矩阵形状为 $M\times M$。
+第一层查询由可学习参数 $Q_M$ 初始化；后续层查询是上一层已经融合参考信息的风格 token。
+
+拼接只是键值输入的整理，不含可学习参数，也不构成独立编码阶段。
+\textbf{$U$ 不进行自注意力，也不在集合汇总中被更新；每层 CA 都读取同一份 $U$。}
+这里的“不更新 $U$”指前向计算中的信息流；训练梯度仍可通过每层键值分支回传至逐组编码器。
+补齐参考产生的描述在每一层 CA 中使用相同的键值掩码。
+$Q_M$ 与 $Q_Z$ 是不同的参数集合，即使 $M=Z$ 也不共享。
+
+汇总时不添加参考组序号、拼接后的绝对序列位置或新的空间网格位置。
+组内空间与上下文信息可以存在于描述内容中，但查询不再显式访问原始分组关系。
+这沿用阶段 B 的假设：压缩描述应足以支持内容驱动的集合汇总。
+
+$S$ 表示对整个参考集合的风格总结；其行数与 $N$ 无关，但数值内容依赖全部有效参考。
+$M$ 是表示容量，不等于预先定义的中文风格属性数量。
+参考分支只依赖 $\mathcal C$，不依赖目标字 $K_\star$、时间 $t$ 或当前状态 $x_t$。
+因此同一组参考的 $S$ 可以在多个目标字和各 flow 步之间复用。
+训练时不截断其梯度，参考分支与生成主干联合优化；训练更新后缓存需重新计算。
+
+\section{参考顺序无关性与可变数量输入}
+
+本任务要求参考对整体重排不改变输出；不允许仅重排 $H_i$ 或仅重排 $K_i$。
+逐组编码与压缩使用共享参数，因此组重排只会重排 $U$ 的整组行，得到 $U'=PU$。
+由于键值投影与归一化均逐 token 进行，对应有 $K'=PK$、$V'=PV$。
+任意固定查询对键和值的同步重排不变。以单头为例，
+\[
+\operatorname{softmax}\!\left(\frac{Q(PK)^\top}{\sqrt{d_h}}\right)PV
+=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
+\]
+第一层 CA 因而对参考重排不变；其后的 $M$ token 自注意力、逐 token 前馈网络和残差也不引入参考顺序。
+以此逐层归纳，后续 CA 的查询同样不随参考重排变化，所以最终 $S$ 不变。
+固定初始噪声和积分设置后，生成结果也不变，允许浮点计算误差。
+本稿暂不使用 dropout；若以后引入随机操作，需区分确定性推理与随机训练中的性质。
+
+批处理中不同样本可以有不同 $N$。补齐参考组产生的全部 $Z$ 个描述必须在最终交叉注意力中作为无效键值屏蔽。
+$M$ 个查询均有效，但不得读取这些补齐 token。
+应避免给一个查询构造全部键均不可见的 softmax。
+$N=1$ 时，$M$ 个查询直接读取唯一一组的 $Z$ 个描述，不需要特殊的跨组退化处理。
+
+\section{生成主干与 flow 起点}
+
+\subsection{目标 patch 与主干结构}
+
+采用带风格交叉注意力的 DiT 主干。在每个时刻，将当前图像与干净目标标准字沿通道拼接：
+\[
+T^{(0)}=\operatorname{PatchEmbed}_{\mathrm{gen}}([x_t,K_\star])+P_{xy}
+\in\R^{L\times d}.
+\]
+主干始终保留 $L=(n/p)^2$ 个空间 token；参考分支与目标分支的分块投影不共享参数。
+每个 block 依次执行目标自注意力 SA、读取 $S$ 的交叉注意力 CA，以及逐 token FFN。
+此处 SA、CA 表示独立的注意力子层，FFN 单独列出；不重复套用参考分支中包含 FFN 的复合块定义。
+
+\textbf{时间调节只施加于 SA、FFN，以及输出头。}
+SA 与 FFN 沿用原始 DiT 的 AdaLN-Zero 配置；新增 CA 采用普通前置 LN 与残差，
+不另外生成时间缩放、偏移或门控。不同 block 各自将同一个 $S$ 投影成键和值。
+CA 的查询来自已经受时间影响的主干特征，因此仍然能够随 $t$ 改变读取方式。
+
+\subsection{时间输入：标准 AdaLN-Zero 与普通 CA}
+
+连续时间 $t\in[0,1]$ 经正弦余弦编码及两层线性映射（中间使用 SiLU）得到共享的
+$e(t)\in\R^d$。编码的时间尺度在训练与推理时保持一致；$t$ 表示流的位置，不是积分步号或步长。
+每个 block 使用自己的一次映射：
+\[
+(a_s,b_s,g_s,a_f,b_f,g_f)
+=\operatorname{Split}_6\!\left(
+W_{\mathrm{mod}}^{(b)}\operatorname{SiLU}(e(t))+c_{\mathrm{mod}}^{(b)}
+\right),
+\qquad W_{\mathrm{mod}}^{(b)}:\R^d\to\R^{6d}.
+\]
+下标 $s,f$ 分别表示 SA 与 FFN。六个向量均为 $d$ 维，在该样本的全部 $L$ 个 token 间广播；
+不同 block 使用不同参数，同一 block 内通过一个线性层一次性生成六组输出。
+定义
+\[
+D_j(T,t)=(1+a_j(t))\odot\LN_j(T)+b_j(t),\qquad j\in\{s,f\}.
+\]
+受时间调节的 LN 不再带自身的可学习仿射参数。一个 block 的完整更新为
+\begin{align*}
+A &= D_s(T,t),\\
+T_s &= T+g_s(t)\odot\MHA_s(A,A,A),\\
+T_c &= T_s+\MHA_c\!\left(\LN_q(T_s),\LN_{kv}(S),\LN_{kv}(S)\right),\\
+T^+ &= T_c+g_f(t)\odot\FFN\!\left(D_f(T_c,t)\right).
+\end{align*}
+CA 中的 Q、K、V 投影仍然彼此独立；注意力矩阵为 $L\times M$。
+主干不直接读取 $R_i$ 或 $U_i$，参考表示 $S$ 本身不接受时间调节。
+
+$W_{\mathrm{mod}}^{(b)}$ 及其偏置零初始化，因此 SA、FFN 的缩放增量、偏移与残差门初始均为零；
+门控向量通过训练学习，不使用额外 sigmoid。新增 CA 保留普通残差，不引入额外零门，
+所以此扩展 block 整体不保证初始恒等；AdaLN-Zero 的零残差初始化作用于 SA、FFN 两个分支。
+
+输出头另用 $\operatorname{SiLU}+\operatorname{Linear}(d,2d)$ 生成 $(a_{\rm out},b_{\rm out})$，
+对最终 $L\times d$ 特征做时间调节的归一化，再用所有 token 共用的线性层 $d\to p^2$：
+\[
+L\times d
+\ \xrightarrow{\text{时间调节 LN + 共享线性层}}\
+L\times p^2
+\ \xrightarrow{\text{按原二维位置拼回}}\
+\widehat v_t\in\R^{n\times n\times1}.
+\]
+沿用原始 DiT 的输出头初始化，时间调节映射与最终 patch 线性映射均零初始化。
+输出矩阵只有 $d\times p^2$ 个权重，不随 $L$ 增长；不存在把整图压成一个 token 后再解码的步骤。
+输出是当前灰度状态的像素速度，而不是最终字图；$K_\star$ 是额外输入条件，不占用输出通道。
+
+\subsection{训练路径：标准字加噪声到手写真值}
+
+本稿暂在像素空间定义 flow，不额外引入图像自编码器。
+主干内部的 patch 特征不是独立的生成状态；若将来改为 latent flow，需另行定义共同编码空间与解码器。
+
+取固定实验超参数 $\sigma>0$，独立采样 $\epsilon\sim\mathcal N(0,I)$ 和 $t\sim\mathcal U(0,1)$，定义
+\begin{align*}
+x_0&=K_\star+\sigma\epsilon,\\
+x_t&=(1-t)x_0+tH_\star,\\
+u&=H_\star-x_0,\\
+\mathcal L&=\mathbb E\left[\frac{1}{n^2}
+\left\|v_\theta(x_t,t,K_\star,S)-u\right\|_F^2\right].
+\end{align*}
+同一个 $x_0$ 同时用于构造 $x_t$ 和监督速度 $u$。
+干净标准字 $K_\star$ 始终作为条件提供；$H_\star$ 仅通过训练状态与监督目标参与训练。
+参考分支的所有可学习查询、编码器和生成主干均由该损失联合训练。
+本稿尚未引入额外的笔画标注损失、风格解耦损失或重建损失。
+
+这里的加噪是以标准字为均值的加性高斯扰动，不是把图像与噪声做权重和为 $1$ 的混合。
+$x_0$ 可能超出 $[-1,1]$；训练状态和积分中间状态均不裁剪。
+训练和推理必须使用相同的起点分布；不能仅在推理时替换纯噪声起点。
+
+\subsection{推理与随机性}
+
+先计算 $S$，再采样 $x_0=K_\star+\sigma\epsilon$，固定 $S,K_\star$ 并求解
+\[
+\frac{dx_t}{dt}=v_\theta(x_t,t,K_\star,S),\qquad t:0\longrightarrow1.
+\]
+暂采用 $J$ 步等步长 Euler 积分：
+\[
+t_j=j/J,\qquad x_{t_{j+1}}=x_{t_j}+\frac1Jv_\theta(x_{t_j},t_j,K_\star,S).
+\]
+仅在最后把 $x_1$ 裁剪至 $[-1,1]$ 并映射回灰度范围，得到 $\widehat H_\star$。
+除初始噪声外，生成过程不引入额外随机量。
+
+当参考、目标和噪声固定时，输出确定。$\sigma=0$ 可另作确定性迁移对照，
+但同一条件下的确定性 ODE 无法产生多个不同写法。
+更大 $\sigma$ 不自动意味着更多合理变化；若需要推理时可调的噪声强度，
+应另行设计覆盖不同强度的训练和相应条件输入，本稿没有默认支持这一能力。
+
+\section{计算成本与压缩的实际含义}
+
+以下仅统计注意力中计算权重与加权求和的主要项，并将重复层数显式写出；忽略常数。
+投影和前馈网络的成本通常还包含“token 数量乘 $d^2$”的项。
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}X l@{}}
+\toprule
+操作 & 主要注意力成本 \\
+\midrule
+$N$ 组分别进行 $L$ 个 patch 的自注意力 & $O(NL^2d)$ \\
+每组用 $Z$ 个查询读取 $L$ 个特征 & $O(NZLd)$ \\
+$B_{\rm set}$ 个集合汇总层：CA 读取 $NZ$ 个描述并对 $M$ 个 token 做 SA
+  & $O\!\left(B_{\rm set}(MNZ+M^2)d\right)$ \\
+一个主干层的目标自注意力 & $O(L^2d)$ \\
+一个主干层读取风格条件 & $O(LMd)$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+计入参考分支的实际层数，本稿默认结构的主要注意力成本为
+\[
+O\!\left(B_{\mathrm{local}}NL^2d+NZLd
++B_{\rm set}(MNZ+M^2)d\right).
+\]
+参考描述不做全局自注意力，故不包含 $O(N^2Z^2d)$ 或 $O((Nq^2)^2d)$ 的计算项；
+新增自注意力只发生在固定数量的 $M$ 个风格 token 上。
+固定 $L,Z,M,d,B_{\rm local},B_{\rm set}$ 时，参考分支的上述计算成本仍随 $N$ 线性增长。
+若不做逐组压缩，而让每层的 $M$ 个查询直接读取全部 $NL$ 个组内特征，
+集合 CA 成本为 $O(B_{\rm set}MNLd)$。
+压缩后单层及全部层的 CA 读取项之比均为 $Z/L$；例如 $L=256,Z=16$ 时，该项变为 $1/16$。
+这一比较不包含新增的逐组压缩成本，不能据此宣称整个参考分支加速 $16$ 倍。
+
+参考编码不在 flow 积分循环内重复执行；相同参考可复用其输出。
+若主干有 $B_{\mathrm{gen}}$ 层、采样有 $J$ 步，其注意力成本约为
+$O(JB_{\mathrm{gen}}(L^2+LM)d)$。
+实际训练显存和时间还取决于批量大小、反向传播、前馈宽度与注意力实现。
+FlashAttention 可降低中间矩阵的显存开销；本版关于 $N$ 的线性计算规模来自结构本身。
+
+压缩的代价同样明确：某种少见笔画或部件证据若在生成 $U_i$ 时已经丢失，
+后续 $M$ 个查询只能利用保留下来的信息，不能通过重新读取 $R_i$ 找回它。
+因此 $Z$ 控制单字证据容量，$M$ 控制集合汇总宽度，$B_{\rm set}$ 控制反复读取和风格 token 交互的深度，三者应分别考察。
+
+
+\end{document}
+

@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.Python
+
+# Virtual environments and packaging
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+dist/
+build/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test, type-checking and coverage caches
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Experiment outputs and model checkpoints
+checkpoints/
+outputs/
+runs/
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# IDEs and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# LaTeX build products (keep .tex sources and PDFs)
+*.aux
+*.bcf
+*.fdb_latexmk
+*.fls
+*.lof
+*.log
+*.lot
+*.out
+*.synctex.gz
+*.toc
+*.xdv

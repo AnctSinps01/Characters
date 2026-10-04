@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+import math
+
+import torch
+from torch import Tensor, nn
+
+
+def _sincos_1d(positions: Tensor, width: int) -> Tensor:
+    if width % 2:
+        raise ValueError("1D sin/cos width must be even")
+    frequencies = torch.arange(width // 2, dtype=torch.float32)
+    frequencies = torch.exp(-math.log(10_000.0) * frequencies / (width // 2))
+    angles = positions.float().reshape(-1, 1) * frequencies.reshape(1, -1)
+    return torch.cat((angles.sin(), angles.cos()), dim=1)
+
+
+def sincos_2d_position_embedding(grid_size: int, width: int) -> Tensor:
+    """Return fixed row/column positions with shape ``[1, grid_size**2, width]``."""
+
+    if width % 4:
+        raise ValueError("2D sin/cos width must be divisible by 4")
+    rows, columns = torch.meshgrid(
+        torch.arange(grid_size), torch.arange(grid_size), indexing="ij"
+    )
+    row_embedding = _sincos_1d(rows.reshape(-1), width // 2)
+    column_embedding = _sincos_1d(columns.reshape(-1), width // 2)
+    return torch.cat((row_embedding, column_embedding), dim=1).unsqueeze(0)
+
+
+class PatchEmbed2D(nn.Module):
+    def __init__(
+        self,
+        image_size: int,
+        patch_size: int,
+        in_channels: int,
+        hidden_size: int,
+    ) -> None:
+        super().__init__()
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.projection = nn.Conv2d(
+            in_channels,
+            hidden_size,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+        positions = sincos_2d_position_embedding(image_size // patch_size, hidden_size)
+        self.register_buffer("positions", positions, persistent=False)
+
+    def forward(self, images: Tensor) -> Tensor:
+        if images.ndim != 4:
+            raise ValueError(f"images must have shape [B, C, H, W], got {images.shape}")
+        if images.shape[-2:] != (self.image_size, self.image_size):
+            raise ValueError(
+                f"expected {self.image_size}x{self.image_size} images, got {images.shape[-2:]}"
+            )
+        tokens = self.projection(images).flatten(2).transpose(1, 2)
+        return tokens + self.positions.to(dtype=tokens.dtype)
+
+
+class Mlp(nn.Module):
+    def __init__(self, hidden_size: int, mlp_ratio: float) -> None:
+        super().__init__()
+        inner_size = int(hidden_size * mlp_ratio)
+        self.layers = nn.Sequential(
+            nn.Linear(hidden_size, inner_size),
+            nn.GELU(),
+            nn.Linear(inner_size, hidden_size),
+        )
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        return self.layers(inputs)
+
+
+class SelfAttentionBlock(nn.Module):
+    """Pre-norm self-attention followed by a pre-norm token-wise MLP."""
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
+        super().__init__()
+        self.attention_norm = nn.LayerNorm(hidden_size)
+        self.attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.mlp_norm = nn.LayerNorm(hidden_size)
+        self.mlp = Mlp(hidden_size, mlp_ratio)
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        normalized = self.attention_norm(inputs)
+        attended = self.attention(normalized, normalized, normalized, need_weights=False)[0]
+        outputs = inputs + attended
+        return outputs + self.mlp(self.mlp_norm(outputs))
+
+
+class CrossAttentionBlock(nn.Module):
+    """Update query tokens by reading memory tokens; memory is never written back."""
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
+        super().__init__()
+        self.query_norm = nn.LayerNorm(hidden_size)
+        self.memory_norm = nn.LayerNorm(hidden_size)
+        self.attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.mlp_norm = nn.LayerNorm(hidden_size)
+        self.mlp = Mlp(hidden_size, mlp_ratio)
+
+    def forward(
+        self,
+        queries: Tensor,
+        memory: Tensor,
+        *,
+        memory_padding_mask: Tensor | None = None,
+    ) -> Tensor:
+        normalized_queries = self.query_norm(queries)
+        normalized_memory = self.memory_norm(memory)
+        attended = self.attention(
+            normalized_queries,
+            normalized_memory,
+            normalized_memory,
+            key_padding_mask=memory_padding_mask,
+            need_weights=False,
+        )[0]
+        outputs = queries + attended
+        return outputs + self.mlp(self.mlp_norm(outputs))
+
+
+class SetAggregationBlock(nn.Module):
+    """Refine fixed style latents with CA(memory), SA(latents), then an FFN."""
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
+        super().__init__()
+        self.cross_query_norm = nn.LayerNorm(hidden_size)
+        self.cross_memory_norm = nn.LayerNorm(hidden_size)
+        self.cross_attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.self_norm = nn.LayerNorm(hidden_size)
+        self.self_attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.mlp_norm = nn.LayerNorm(hidden_size)
+        self.mlp = Mlp(hidden_size, mlp_ratio)
+
+    def forward(
+        self,
+        latents: Tensor,
+        memory: Tensor,
+        *,
+        memory_padding_mask: Tensor | None = None,
+    ) -> Tensor:
+        normalized_memory = self.cross_memory_norm(memory)
+        cross_outputs = self.cross_attention(
+            self.cross_query_norm(latents),
+            normalized_memory,
+            normalized_memory,
+            key_padding_mask=memory_padding_mask,
+            need_weights=False,
+        )[0]
+        latents = latents + cross_outputs
+
+        normalized_latents = self.self_norm(latents)
+        self_outputs = self.self_attention(
+            normalized_latents,
+            normalized_latents,
+            normalized_latents,
+            need_weights=False,
+        )[0]
+        latents = latents + self_outputs
+        return latents + self.mlp(self.mlp_norm(latents))
+
+
+def modulate(inputs: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+    return inputs * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+class ContinuousTimeEmbedding(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        frequency_size: int,
+        time_scale: float,
+        max_period: float = 10_000.0,
+    ) -> None:
+        super().__init__()
+        frequencies = torch.arange(frequency_size // 2, dtype=torch.float32)
+        frequencies = torch.exp(
+            -math.log(max_period) * frequencies / (frequency_size // 2)
+        )
+        self.register_buffer("frequencies", frequencies, persistent=False)
+        self.time_scale = time_scale
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+
+    def forward(self, times: Tensor) -> Tensor:
+        if times.ndim != 1:
+            raise ValueError(f"times must have shape [B], got {times.shape}")
+        angles = (
+            times.float().unsqueeze(1)
+            * self.time_scale
+            * self.frequencies.unsqueeze(0)
+        )
+        embedding = torch.cat((angles.cos(), angles.sin()), dim=1)
+        return self.mlp(embedding)
+
+
+class AdaLNZeroDiTBlock(nn.Module):
+    """DiT block with time-modulated SA/MLP and an ordinary style CA branch."""
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
+        super().__init__()
+        self.self_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.self_attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.cross_query_norm = nn.LayerNorm(hidden_size)
+        self.cross_memory_norm = nn.LayerNorm(hidden_size)
+        self.cross_attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.mlp_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.mlp = Mlp(hidden_size, mlp_ratio)
+        self.modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size))
+        nn.init.zeros_(self.modulation[-1].weight)
+        nn.init.zeros_(self.modulation[-1].bias)
+
+    def forward(self, inputs: Tensor, style: Tensor, time_embedding: Tensor) -> Tensor:
+        scale_sa, shift_sa, gate_sa, scale_mlp, shift_mlp, gate_mlp = (
+            self.modulation(time_embedding).chunk(6, dim=1)
+        )
+        sa_inputs = modulate(self.self_norm(inputs), shift_sa, scale_sa)
+        sa_outputs = self.self_attention(sa_inputs, sa_inputs, sa_inputs, need_weights=False)[0]
+        outputs = inputs + gate_sa.unsqueeze(1) * sa_outputs
+
+        cross_outputs = self.cross_attention(
+            self.cross_query_norm(outputs),
+            self.cross_memory_norm(style),
+            self.cross_memory_norm(style),
+            need_weights=False,
+        )[0]
+        outputs = outputs + cross_outputs
+
+        mlp_inputs = modulate(self.mlp_norm(outputs), shift_mlp, scale_mlp)
+        return outputs + gate_mlp.unsqueeze(1) * self.mlp(mlp_inputs)
+
+
+class FinalVelocityLayer(nn.Module):
+    def __init__(self, hidden_size: int, patch_size: int, out_channels: int) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.out_channels = out_channels
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size))
+        self.projection = nn.Linear(hidden_size, patch_size**2 * out_channels)
+        nn.init.zeros_(self.modulation[-1].weight)
+        nn.init.zeros_(self.modulation[-1].bias)
+        nn.init.zeros_(self.projection.weight)
+        nn.init.zeros_(self.projection.bias)
+
+    def forward(self, tokens: Tensor, time_embedding: Tensor) -> Tensor:
+        scale, shift = self.modulation(time_embedding).chunk(2, dim=1)
+        return self.projection(modulate(self.norm(tokens), shift, scale))
+
+
+def unpatchify(patches: Tensor, grid_size: int, patch_size: int, channels: int) -> Tensor:
+    batch, patch_count, patch_width = patches.shape
+    expected_count = grid_size**2
+    expected_width = patch_size**2 * channels
+    if patch_count != expected_count or patch_width != expected_width:
+        raise ValueError(
+            f"expected patches [B, {expected_count}, {expected_width}], got {patches.shape}"
+        )
+    images = patches.reshape(
+        batch, grid_size, grid_size, patch_size, patch_size, channels
+    )
+    images = images.permute(0, 5, 1, 3, 2, 4).contiguous()
+    return images.reshape(
+        batch, channels, grid_size * patch_size, grid_size * patch_size
+    )
