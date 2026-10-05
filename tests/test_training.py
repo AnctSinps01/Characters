@@ -5,8 +5,10 @@ from contextlib import redirect_stdout
 from dataclasses import asdict
 import io
 import json
+import multiprocessing
 import os
 from pathlib import Path
+import random
 import struct
 import tempfile
 import unittest
@@ -19,7 +21,7 @@ from torch.utils.data import DataLoader
 
 from src.prepare_data import prepare
 from src import ModelConfig, TrainingConfig
-from src.data import HandwritingEpisodes, iter_gnt, normalize_image, read_manifest
+from src.data import HandwritingEpisodes, PreloadedGlyphs, iter_gnt, normalize_image, read_manifest
 from src.train import is_unstarted_run, learning_rate, optimizer_update, resolve_device, run
 
 
@@ -45,7 +47,81 @@ def fixture_data(root):
     }), encoding="utf-8")
 
 
+def change_shared_pixel(store):
+    # A child writes through the backing buffer only to prove storage is shared.
+    assert not store.writer_images("0").flags.writeable
+    assert not store.standards.flags.writeable
+    np.frombuffer(store._buffer, dtype=np.uint8)[0] = 213
+
+
 class DataTests(unittest.TestCase):
+    def test_preload_shared_storage_and_sampling_without_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture_data(root)
+            store = PreloadedGlyphs(root)
+            self.assertEqual(store.nbytes, (3 * 6 + 6) * 16 * 16)
+            self.assertEqual(store.standards.dtype, np.uint8)
+            self.assertFalse(store.standards.flags.writeable)
+            for writer in range(3):
+                np.testing.assert_array_equal(store.writer_images(str(writer)), store.standards + writer)
+            datasets = [HandwritingEpisodes(root, split, length=6, min_references=1,
+                                             max_references=3, seed=5, preloaded=store)
+                        for split in ("train", "val")]
+            self.assertIs(datasets[0]._preloaded, datasets[1]._preloaded)
+            # Spawn must transfer the shared allocation, not a private pixel copy.
+            child = multiprocessing.get_context("spawn").Process(target=change_shared_pixel, args=(store,))
+            child.start()
+            child.join(timeout=30)
+            if child.is_alive():
+                child.terminate()
+                child.join()
+                self.fail("shared-memory child timed out")
+            self.assertEqual(child.exitcode, 0)
+            self.assertEqual(store.writer_images("0")[0, 0, 0], 213)
+            for path in root.glob("*.npy"):
+                path.unlink()
+            # Neither parent nor newly spawned loader workers may reopen NPYs.
+            for dataset in datasets:
+                expected = list(DataLoader(dataset, batch_size=3, num_workers=0))
+                actual = list(DataLoader(dataset, batch_size=3, num_workers=2,
+                                         multiprocessing_context="spawn"))
+                self.assertEqual(len(actual), len(expected))
+                for direct, worker in zip(expected, actual):
+                    for key in direct:
+                        torch.testing.assert_close(direct[key], worker[key], rtol=0, atol=0)
+                dataset.close()
+
+    def test_vectorized_episodes_preserve_sampling_and_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture_data(root)
+            dataset = HandwritingEpisodes(root, "train", length=24, min_references=1,
+                                          max_references=5, seed=5)
+            standards = np.load(root / "standards.npy")
+            for index in range(len(dataset)):
+                rng = random.Random(f"5:{index}")
+                writer = dataset.writers[rng.randrange(len(dataset.writers))]
+                count = rng.randint(1, 5)
+                selected = rng.sample(range(len(writer["labels"])), count + 1)
+                images = np.load(root / writer["file"])
+                def convert(array):
+                    return torch.from_numpy(array.copy()).float().unsqueeze(0) / 127.5 - 1
+                expected = {
+                    "target_standard": convert(standards[writer["labels"][selected[0]]]),
+                    "target_handwriting": convert(images[selected[0]]),
+                    "reference_standard": torch.ones(5, 1, 16, 16),
+                    "reference_handwriting": torch.ones(5, 1, 16, 16),
+                    "reference_mask": torch.arange(5) < count,
+                }
+                for slot, sample in enumerate(selected[1:]):
+                    expected["reference_standard"][slot] = convert(standards[writer["labels"][sample]])
+                    expected["reference_handwriting"][slot] = convert(images[sample])
+                actual = dataset[index]
+                for key in expected:
+                    torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+            dataset.close()
+
     def test_reference_range_includes_one_and_configured_maximum(self):
         self.assertEqual(TrainingConfig().min_references, 1)
         with tempfile.TemporaryDirectory() as directory:
@@ -184,6 +260,26 @@ class TrainingTests(unittest.TestCase):
                 bf16.assert_not_called()
             self.assertFalse(output.exists())
 
+    def test_gpu_preload_requires_cuda_and_is_runtime_only(self):
+        with self.assertRaises(ValueError):
+            TrainingConfig(preload_to_gpu=1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            fixture_data(data)
+            output = root / "run"
+            config = TrainingConfig(steps=2, warmup_steps=0, batch_size=1,
+                                    min_references=1, max_references=2,
+                                    preload_to_gpu=True, workers=2)
+            model = ModelConfig(image_size=16, patch_size=4)
+            args = argparse.Namespace(data=data, output=output, resume=None,
+                                      device="cpu", workers=None, stop_after=1)
+            with patch("src.train.TrainingConfig", return_value=config), \
+                 patch("src.train.ModelConfig", return_value=model):
+                with self.assertRaisesRegex(ValueError, "requires CUDA"):
+                    run(args)
+            self.assertFalse(output.exists())
+
     def test_retry_does_not_overwrite_existing_results(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -265,6 +361,7 @@ class TrainingTests(unittest.TestCase):
             full = torch.load(root / "full/last.pt", weights_only=True)
             resumed = torch.load(root / "split/last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 3)
+            self.assertNotIn("preload_to_gpu", resumed["settings"]["training"])
             for section in ("model", "ema"):
                 for name in full[section]:
                     torch.testing.assert_close(full[section][name], resumed[section][name], rtol=0, atol=0)

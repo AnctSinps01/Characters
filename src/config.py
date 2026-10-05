@@ -67,7 +67,7 @@ class TrainingConfig:
     """Edit these defaults for a new run; resume restores saved settings."""
 
     steps: int = 100_000
-    batch_size: int = 32
+    batch_size: int = 64
     accumulation_steps: int = 1
     min_references: int = 1               # Inclusive lower bound
     max_references: int = 16              # Sample reference count uniformly up to this
@@ -78,15 +78,18 @@ class TrainingConfig:
     gradient_clip: float = 1.0
     ema_decay: float = 0.999
     precision: str = "bf16"
-    workers: int = 4
+    preload_to_gpu: bool = False          # Keep prepared uint8 glyphs in VRAM
+    workers: int = 8
     val_batches: int = 16
     validate_every: int = 1_000
     save_every: int = 500
     log_every: int = 20
-    sample_steps: int = 32
+    sample_steps: int = 32                # t 从 0 到 1 采样次数
     seed: int = 42
 
     def __post_init__(self):
+        if type(self.preload_to_gpu) is not bool:
+            raise ValueError("preload_to_gpu must be a bool")
         for name in ("steps", "batch_size", "accumulation_steps", "min_references",
                      "max_references", "val_batches", "validate_every", "save_every",
                      "log_every", "sample_steps"):

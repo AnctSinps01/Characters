@@ -13,7 +13,7 @@
 
 ## 2. 复制项目，安装依赖
 
-把整个项目目录复制到 3090 服务器。选择带 Python 3.10+、CUDA 版 PyTorch 2.3+ 的环境，进入复制后的项目根目录：
+把整个项目目录复制到 GPU 服务器。选择带 Python 3.10+、CUDA 版 PyTorch 2.3+ 的环境，进入复制后的项目根目录：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -30,7 +30,9 @@ python -m src.prepare_data --gnt-root data/gnt --font fonts/WenJinMinchoP0-Regul
 
 ## 4. 先训练 100 步
 
-模型和训练参数直接改 `src/config.py`。`TrainingConfig.min_references = 1`、`max_references = 8`，每个样本在此范围内均匀随机抽参考字数；需要更大上限就改 `max_references`。图像尺寸和参考数量上限请在处理数据前确定。
+模型和训练参数直接改 `src/config.py`。每个样本在 `min_references` 到 `max_references` 之间均匀随机抽参考字数。图像尺寸和参考数量上限请在处理数据前确定。
+
+训练启动时自动把 `data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。更新训练代码后无需重新 prepare。
 
 ```bash
 python -m src.train --data data/prepared --output runs/first --device cuda --stop-after 100

@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 import copy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import math
 from pathlib import Path
@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from . import Glyph2Hand, ModelConfig, build_flow_matching_batch, flow_matching_loss, sample_euler
 from .config import TrainingConfig
-from .data import HandwritingEpisodes, read_manifest
+from .data import HandwritingEpisodes, PreloadedGlyphs, read_manifest
 
 
 def learning_rate(step: int, config: TrainingConfig) -> float:
@@ -164,7 +164,8 @@ def is_unstarted_run(output: Path, settings: dict, fingerprint: str) -> bool:
         previous = json.loads(metadata.read_text(encoding="utf-8"))
         if not isinstance(previous, dict):
             return False
-        if previous.get("settings") != settings or previous.get("data_fingerprint") != fingerprint:
+        if comparable_settings(previous.get("settings")) != comparable_settings(settings) \
+                or previous.get("data_fingerprint") != fingerprint:
             return False
         for entry in output.iterdir():
             if entry.is_symlink():
@@ -179,8 +180,20 @@ def is_unstarted_run(output: Path, settings: dict, fingerprint: str) -> bool:
     return True
 
 
+def comparable_settings(settings):
+    """Remove runtime-only options from saved settings comparisons."""
+    if not isinstance(settings, dict):
+        return settings
+    settings = copy.deepcopy(settings)
+    training = settings.get("training")
+    if isinstance(training, dict):
+        training.pop("preload_to_gpu", None)
+    return settings
+
+
 def run(args):
     device = resolve_device(args.device)
+    local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
     if checkpoint is not None and checkpoint.get("version") != 1:
         raise ValueError("unsupported checkpoint version")
@@ -189,11 +202,16 @@ def run(args):
         if set(settings) != {"model", "training"}:
             raise ValueError("checkpoint settings must contain model and training sections")
         model_config = ModelConfig(**settings["model"])
-        config = TrainingConfig(**settings["training"])
+        saved_training = dict(settings["training"])
+        saved_training.pop("preload_to_gpu", None)
+        config = replace(TrainingConfig(**saved_training),
+                         preload_to_gpu=local_config.preload_to_gpu)
     else:
         model_config = ModelConfig()
-        config = TrainingConfig()
-    settings = {"model": asdict(model_config), "training": asdict(config)}
+        config = local_config
+    saved_training = asdict(config)
+    saved_training.pop("preload_to_gpu")
+    settings = {"model": asdict(model_config), "training": saved_training}
     precision = config.precision if device.type == "cuda" else "fp32"
     if precision == "bf16" and not torch.cuda.is_bf16_supported():
         raise ValueError("GPU does not support bf16; set precision='fp16' in src/config.py for a new run")
@@ -209,6 +227,13 @@ def run(args):
     workers = config.workers if args.workers is None else args.workers
     if workers < 0:
         raise ValueError("workers must be nonnegative")
+    if config.preload_to_gpu:
+        if device.type != "cuda":
+            raise ValueError("preload_to_gpu=True requires CUDA training")
+        if workers:
+            print(f"preload_to_gpu=True: using workers=0 instead of {workers}; "
+                  "CUDA-resident data must be sampled in the training process.", flush=True)
+            workers = 0
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
         if not is_unstarted_run(args.output, settings, fingerprint):
             raise ValueError("output is nonempty; use --resume or choose a new output directory")
@@ -217,7 +242,8 @@ def run(args):
         raise ValueError("nonempty resume output has no run.json; choose a new directory")
     if checkpoint and (args.output / "run.json").exists():
         previous = json.loads((args.output / "run.json").read_text(encoding="utf-8"))
-        if previous["settings"] != settings or previous["data_fingerprint"] != fingerprint:
+        if comparable_settings(previous["settings"]) != comparable_settings(settings) \
+                or previous["data_fingerprint"] != fingerprint:
             raise ValueError("output belongs to another run; choose a new output directory")
         latest = args.output / "last.pt"
         if latest.exists():
@@ -229,6 +255,7 @@ def run(args):
     (args.output / "run.json").write_text(json.dumps({
         "settings": settings, "data_fingerprint": fingerprint,
         "device": str(device), "precision": precision, "torch": str(torch.__version__),
+        "preload_to_gpu": config.preload_to_gpu,
     }, indent=2), encoding="utf-8")
     torch.manual_seed(config.seed)
     if device.type == "cuda":
@@ -251,7 +278,12 @@ def run(args):
             torch.cuda.set_rng_state(checkpoint["cuda_rng"], device)
     del checkpoint
     episodes_per_step = config.batch_size * config.accumulation_steps
-    common = dict(min_references=config.min_references, max_references=config.max_references)
+    data_device = device if config.preload_to_gpu else torch.device("cpu")
+    preloaded = PreloadedGlyphs(args.data, device=data_device, verbose=True)
+    if preloaded.fingerprint != fingerprint:
+        raise ValueError("prepared manifest changed during startup")
+    common = dict(min_references=config.min_references, max_references=config.max_references,
+                  preloaded=preloaded)
     training = HandwritingEpisodes(args.data, "train", length=config.steps * episodes_per_step,
                                    seed=config.seed, **common)
     validation = HandwritingEpisodes(args.data, "val", length=config.val_batches * config.batch_size,
@@ -259,7 +291,8 @@ def run(args):
     # Private generators prevent iterator construction from advancing model RNG.
     loader = DataLoader(training, batch_size=config.batch_size,
                         sampler=range(completed * episodes_per_step, stop_step * episodes_per_step),
-                        num_workers=workers, pin_memory=device.type == "cuda",
+                        num_workers=workers,
+                        pin_memory=device.type == "cuda" and not config.preload_to_gpu,
                         persistent_workers=workers > 0,
                         generator=torch.Generator().manual_seed(config.seed))
     val_loader = DataLoader(validation, batch_size=config.batch_size, num_workers=0,

@@ -1,9 +1,9 @@
 """CASIA GNT parsing, glyph preprocessing, and writer-conditioned episodes."""
 from __future__ import annotations
 
-from collections import OrderedDict
 import hashlib
 import json
+from multiprocessing import RawArray
 from pathlib import Path
 import random
 import struct
@@ -77,6 +77,100 @@ def read_manifest(root: Path) -> tuple[dict, str]:
     return manifest, hashlib.sha256(raw).hexdigest()
 
 
+class PreloadedGlyphs:
+    """All prepared pixels, eagerly loaded as uint8 on CPU or one CUDA device.
+
+    On CPU, RawArray's backing is inherited by fork workers and passed by handle
+    to spawn workers. CUDA storage is used only from the training process.
+    Prepared NPY files are closed before any episode is sampled.
+    """
+
+    def __init__(self, root: str | Path, *, device: str | torch.device = "cpu",
+                 verbose: bool = False):
+        self.root = Path(root).resolve()
+        self.device = torch.device(device)
+        if self.device.type not in ("cpu", "cuda"):
+            raise ValueError("prepared glyphs can only be preloaded to cpu or cuda")
+        self.manifest, self.fingerprint = read_manifest(self.root)
+        self.image_size = self.manifest["image_size"]
+        self.standard_count = len(self.manifest["characters"])
+        self.writer_ranges = {}
+        self.handwriting_count = 0
+        for writer in self.manifest["writers"]:
+            count = len(writer["labels"])
+            if any(type(label) is not int or not 0 <= label < self.standard_count
+                   for label in writer["labels"]):
+                raise ValueError(f"writer {writer['id']} has invalid standard-glyph indices")
+            self.writer_ranges[writer["id"]] = (self.handwriting_count, count)
+            self.handwriting_count += count
+        self.nbytes = (self.handwriting_count + self.standard_count) * self.image_size**2
+        if not self.nbytes:
+            raise ValueError("prepared dataset has no pixels")
+        if verbose:
+            print(f"Preloading all train/val glyphs: {self.handwriting_count:,} handwriting + "
+                  f"{self.standard_count:,} standards, {self.nbytes / 1024**3:.3f} GiB uint8 "
+                  + ("in shared CPU memory (one copy for all workers)."
+                     if self.device.type == "cpu" else f"on {self.device}."), flush=True)
+        if self.device.type == "cpu":
+            self._buffer = RawArray("B", self.nbytes)
+            self._attach_views()
+            self._handwriting.setflags(write=True)
+            self.standards.setflags(write=True)
+        else:
+            self._buffer = None
+            pixels = torch.empty(
+                self.handwriting_count + self.standard_count,
+                self.image_size, self.image_size, dtype=torch.uint8, device=self.device)
+            self._handwriting = pixels[:self.handwriting_count]
+            self.standards = pixels[self.handwriting_count:]
+        # Load one writer at a time to avoid a second full dataset-sized copy.
+        self._load_into(self.root / "standards.npy", self.standards)
+        writers = self.manifest["writers"]
+        for index, writer in enumerate(writers):
+            start, count = self.writer_ranges[writer["id"]]
+            self._load_into(self.root / writer["file"], self._handwriting[start:start + count])
+            if verbose and ((index + 1) % 20 == 0 or index + 1 == len(writers)):
+                print(f"Preloaded {index + 1}/{len(writers)} writers.", flush=True)
+        if self.device.type == "cpu":
+            self._handwriting.setflags(write=False)
+            self.standards.setflags(write=False)
+
+    @staticmethod
+    def _load_into(path: Path, destination: np.ndarray | torch.Tensor):
+        images = np.load(path, allow_pickle=False)
+        expected_shape = tuple(destination.shape)
+        if images.dtype != np.uint8 or images.shape != expected_shape:
+            raise ValueError(f"{path}: expected uint8 {destination.shape}, "
+                             f"got {images.dtype} {images.shape}")
+        if isinstance(destination, np.ndarray):
+            np.copyto(destination, images)
+        else:
+            destination.copy_(torch.from_numpy(images))
+
+    def _attach_views(self):
+        pixels = np.frombuffer(self._buffer, dtype=np.uint8).reshape(-1, self.image_size, self.image_size)
+        self._handwriting = pixels[:self.handwriting_count]
+        self.standards = pixels[self.handwriting_count:]
+        self._handwriting.setflags(write=False)
+        self.standards.setflags(write=False)
+
+    def __getstate__(self):
+        if self.device.type != "cpu":
+            raise RuntimeError("CUDA-preloaded glyphs require DataLoader workers=0")
+        state = self.__dict__.copy()
+        state.pop("_handwriting")
+        state.pop("standards")
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._attach_views()
+
+    def writer_images(self, writer_id: str) -> np.ndarray | torch.Tensor:
+        start, count = self.writer_ranges[writer_id]
+        return self._handwriting[start:start + count]
+
+
 class HandwritingEpisodes(Dataset):
     """Stateless sampling: an index always determines the same whole episode.
 
@@ -85,9 +179,14 @@ class HandwritingEpisodes(Dataset):
     """
 
     def __init__(self, root: str | Path, split: str, *, length: int,
-                 min_references: int, max_references: int, seed: int):
+                 min_references: int, max_references: int, seed: int,
+                 preloaded: PreloadedGlyphs | None = None):
         self.root = Path(root)
-        self.manifest, self.fingerprint = read_manifest(self.root)
+        self._preloaded = preloaded if preloaded is not None else PreloadedGlyphs(self.root)
+        if self._preloaded.root != self.root.resolve():
+            raise ValueError("preloaded glyphs belong to a different data directory")
+        self.manifest = self._preloaded.manifest
+        self.fingerprint = self._preloaded.fingerprint
         if not 1 <= min_references <= max_references:
             raise ValueError("expected 1 <= min_references <= max_references")
         if length < 1:
@@ -103,53 +202,44 @@ class HandwritingEpisodes(Dataset):
         self.min_references = min_references
         self.max_references = max_references
         self.seed = seed
-        self._images: OrderedDict = OrderedDict()
-        self._standards = None
 
     def __len__(self):
         return self.length
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["_images"] = OrderedDict()
-        state["_standards"] = None
-        return state
-
     def close(self):
-        """Release this process's memory maps (also useful on Windows)."""
-        self._images.clear()
-        self._standards = None
+        """Release this dataset's reference; other datasets/workers may share it."""
+        self._preloaded = None
 
     def __getitem__(self, index: int):
         rng = random.Random(f"{self.seed}:{index}")
         writer_index = rng.randrange(len(self.writers))
         writer = self.writers[writer_index]
-        if writer_index not in self._images:
-            self._images[writer_index] = np.load(self.root / writer["file"], mmap_mode="r")
-            if len(self._images) > 8:
-                self._images.popitem(last=False)
-        self._images.move_to_end(writer_index)
-        images = self._images[writer_index]
-        if self._standards is None:
-            self._standards = np.load(self.root / "standards.npy", mmap_mode="r")
+        if self._preloaded is None:
+            raise RuntimeError("dataset is closed")
+        images = self._preloaded.writer_images(writer["id"])
         count = rng.randint(self.min_references, self.max_references)
         selected = rng.sample(range(len(writer["labels"])), count + 1)
-        target, references = selected[0], selected[1:]
         labels = writer["labels"]
 
-        def tensor(array):
-            return torch.from_numpy(np.array(array, copy=True)).float().unsqueeze(0) / 127.5 - 1
+        # Gather the whole episode at once instead of converting each glyph in
+        # a Python loop. Advanced indexing creates only the small episode copy.
+        hands = images[selected]
+        standards = self._preloaded.standards[[labels[sample] for sample in selected]]
+        if isinstance(hands, np.ndarray):
+            hands = torch.from_numpy(hands)
+            standards = torch.from_numpy(standards)
+        hands = hands.float().unsqueeze(1) / 127.5 - 1
+        standards = standards.float().unsqueeze(1) / 127.5 - 1
 
         size = self.manifest["image_size"]
-        ref_hand = torch.ones(self.max_references, 1, size, size)
+        ref_hand = hands.new_ones(self.max_references, 1, size, size)
         ref_std = torch.ones_like(ref_hand)
-        for slot, sample in enumerate(references):
-            ref_hand[slot] = tensor(images[sample])
-            ref_std[slot] = tensor(self._standards[labels[sample]])
-        mask = torch.arange(self.max_references) < count
+        ref_hand[:count] = hands[1:]
+        ref_std[:count] = standards[1:]
+        mask = torch.arange(self.max_references, device=hands.device) < count
         return {
-            "target_standard": tensor(self._standards[labels[target]]),
-            "target_handwriting": tensor(images[target]),
+            "target_standard": standards[0],
+            "target_handwriting": hands[0],
             "reference_handwriting": ref_hand,
             "reference_standard": ref_std,
             "reference_mask": mask,
