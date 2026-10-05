@@ -45,6 +45,7 @@ python -m src.train --data data/prepared --output runs/first --device cuda --sto
 | `last.pt` | 最新训练状态，用于续训 |
 | `best.pt` | 验证损失最低的训练状态 |
 | `metrics.jsonl` | 训练日志 |
+| `gradient_diagnostics.jsonl` | 裁剪前梯度诊断：范数最大的参数/模块、最大梯度元素、裁剪比例与非有限值位置 |
 | `run.json` | 本次配置 |
 | `previews/step_0000100.png` | 第 100 步生成对照图，后续预览也放在 `previews/` |
 
@@ -59,3 +60,15 @@ python -m src.train --data data/prepared --output runs/first --resume runs/first
 ```
 
 按 `Ctrl+C` 后等保存完成再退出。训练结果都在本项目的 `runs/first/`，退租前复制回来。
+
+## 6. 排查梯度异常
+
+`metrics.jsonl` 中的 `grad_norm` 是 AMP 反缩放后、裁剪前的全局 L2 范数；`grad_clip_scale` 是本步裁剪乘数。默认阈值为 1，原始范数 330 时裁剪乘数约为 0.00303；AdamW 的实际参数更新还取决于其历史状态。
+
+启动/续训的第一步、每隔 `log_every` 步和计划结束步，会在 `gradient_diagnostics.jsonl` 记录梯度最大的 8 个参数及模块。真实非有限梯度、非有限损失或范数计算回退到 float64 时，无论日志间隔都会记录。每行包含步数和实际训练精度；梯度记录还包含 AMP 缩放倍率、尝试次数和裁剪信息。诊断中的 `"inf"` / `"nan"` 使用字符串保存，以保证文件仍是合法 JSON。
+
+若 float32 范数计算得到 Inf/NaN，训练器先以 float64 重算，区分范数归约溢出与梯度元素本身异常。有限梯度按真实范数裁剪；真正非有限的梯度不会送入优化器。FP16 溢出仍会降低 AMP 缩放倍率并用相同数据、时间和噪声重试；BF16/FP32 遇到非有限梯度会记录参数位置后停止，保留已有检查点。这项处理不能保证网络本身稳定，持续增大的原始梯度仍应排查。
+
+先查看异常前后 `top_parameters` 和 `top_modules` 的变化，确定问题集中在参考分支、时间调制、注意力还是输出层，再针对该处检查激活和归一化输入方差。参考分支的描述 token 与最终风格 token 在被下游注意力读取时已有 LayerNorm，仅在浓缩输出后重复添加归一化不能证明能够修复爆炸。
+
+以上诊断不改变模型结构和检查点版本；当前版本 2 的检查点可直接续训，无需重新准备数据。

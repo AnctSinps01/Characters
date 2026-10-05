@@ -83,7 +83,7 @@ class TrainingConfig:
     val_batches: int = 16
     validate_every: int = 1_000
     save_every: int = 500
-    log_every: int = 20
+    log_every: int = 50
     sample_steps: int = 32                # t 从 0 到 1 采样次数
     seed: int = 42
 

@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from . import Glyph2Hand, ModelConfig, build_flow_matching_batch, flow_matching_loss, sample_euler
 from .config import TrainingConfig
 from .data import HandwritingEpisodes, PreloadedGlyphs, read_manifest
+from .diagnostics import GradientSnapshot, json_number
 
 
 def learning_rate(step: int, config: TrainingConfig) -> float:
@@ -74,7 +75,8 @@ def batch_loss(model, batch):
     return flow_matching_loss(prediction.float(), flow.target_velocity.float())
 
 
-def optimizer_update(model, optimizer, scaler, batches, device, precision, config):
+def optimizer_update(model, optimizer, scaler, batches, device, precision, config,
+                     *, on_diagnostic=None, diagnose=False):
     """Retry FP16 overflow at a lower scale using the same episodes and noise."""
     cpu_rng = torch.get_rng_state()
     cuda_rng = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
@@ -90,23 +92,33 @@ def optimizer_update(model, optimizer, scaler, batches, device, precision, confi
             with autocast_context(device, precision):
                 loss = batch_loss(model, batch)
             if not torch.isfinite(loss):
+                if on_diagnostic is not None:
+                    on_diagnostic({"event": "nonfinite_loss", "attempt": attempt + 1,
+                                   "loss": json_number(loss.detach().item())})
                 raise FloatingPointError("non-finite training loss; last checkpoint preserved")
             total_loss += loss.detach().item() / config.accumulation_steps
             scaler.scale(loss / config.accumulation_steps).backward()
         scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip,
-                                                   error_if_nonfinite=not scaler.is_enabled())
-        if not torch.isfinite(grad_norm):
-            if not any(p.grad is not None and not torch.isfinite(p.grad).all()
-                       for p in model.parameters()):
-                raise FloatingPointError("gradient norm overflow")
+        gradients = GradientSnapshot.capture(model)
+        finite = bool(torch.isfinite(gradients.total))
+        if on_diagnostic is not None and (diagnose or not finite or gradients.used_float64):
+            report = gradients.report(config.gradient_clip)
+            report.update({"attempt": attempt + 1, "amp_scale": scaler.get_scale()})
+            on_diagnostic(report)
+        if not finite:
+            if not scaler.is_enabled():
+                bad = gradients.report(config.gradient_clip)["nonfinite_parameters"]
+                raise FloatingPointError(
+                    f"non-finite gradients in {', '.join(bad)}; last checkpoint preserved"
+                )
             # unscale_ recorded overflow; GradScaler skips this optimizer update.
             scaler.step(optimizer)
             scaler.update()
             continue
+        gradients.clip(config.gradient_clip)
         scaler.step(optimizer)
         scaler.update()
-        return total_loss, grad_norm.item()
+        return total_loss, gradients.total.item()
     raise FloatingPointError("FP16 gradients remain non-finite after 16 scale reductions")
 
 
@@ -349,6 +361,7 @@ def run(args):
 
     print(f"Device={device}, precision={precision}, parameters={sum(p.numel() for p in model.parameters()):,}; "
           f"effective batch={episodes_per_step}; start step={completed}", flush=True)
+    start_step = completed
     start = time.monotonic()
     try:
         for step in range(completed + 1, stop_step + 1):
@@ -356,14 +369,26 @@ def run(args):
             for group in optimizer.param_groups:
                 group["lr"] = lr
             batches = [next(iterator) for _ in range(config.accumulation_steps)]
+
+            def record_diagnostic(report):
+                record = {"step": step, "precision": precision, **report}
+                with (args.output / "gradient_diagnostics.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, allow_nan=False) + "\n")
+                if report["event"] != "gradients" or report.get("norm_float64_fallback"):
+                    print(f"Gradient diagnostic at step {step}: {report['event']}; "
+                          f"see {args.output / 'gradient_diagnostics.jsonl'}", flush=True)
+
             total_loss, grad_norm = optimizer_update(
-                model, optimizer, scaler, batches, device, precision, config)
+                model, optimizer, scaler, batches, device, precision, config,
+                on_diagnostic=record_diagnostic,
+                diagnose=(step == start_step + 1 or step % config.log_every == 0 or step == stop_step))
             with torch.no_grad():
                 for averaged, current in zip(ema.parameters(), model.parameters()):
                     averaged.lerp_(current, 1 - config.ema_decay)
             completed = step
             metrics = {"step": step, "train_loss": total_loss, "lr": lr,
                        "grad_norm": grad_norm,
+                       "grad_clip_scale": min(1.0, config.gradient_clip / (grad_norm + 1e-6)),
                        "elapsed": f"{time.monotonic() - start:.8f} s"}
             final = step == stop_step or interrupted
             improved = False

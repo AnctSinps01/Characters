@@ -407,6 +407,14 @@ class TrainingTests(unittest.TestCase):
             with Image.open(root / "split/previews/step_0000003.png") as preview:
                 self.assertGreater(preview.width, 0)
             self.assertTrue((root / "split/best.pt").exists())
+            reports = [json.loads(line) for line in
+                       (root / "split/gradient_diagnostics.jsonl").read_text().splitlines()]
+            self.assertEqual([report["step"] for report in reports], [1, 2, 3])
+            self.assertTrue(all(report["event"] == "gradients" for report in reports))
+            self.assertTrue(all(report["top_parameters"] for report in reports))
+            metrics = [json.loads(line) for line in
+                       (root / "split/metrics.jsonl").read_text().splitlines()]
+            self.assertTrue(all(0 < item["grad_clip_scale"] <= 1 for item in metrics))
             # Check data identity before continuation, even when the path is unchanged.
             manifest_path = data / "manifest.json"
             manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")

@@ -9,5 +9,6 @@
 - `data.py`：GNT 读取、字图预处理、全部字图的 uint8 共享内存预加载、按书写者采样的参考与目标数据集。训练和验证及所有 worker 共用一份字图，采样时不再读取 NPY 文件。
 - `prepare_data.py`：数据准备入口，从项目根目录运行 `python -m src.prepare_data`。
 - `train.py`：训练入口，从项目根目录运行 `python -m src.train`。
+- `diagnostics.py`：裁剪前的梯度范数、参数/模块诊断及安全裁剪；范数归约溢出时以 float64 重算，真实非有限梯度交由训练器停止或重试。训练目录中的 `gradient_diagnostics.jsonl` 保存诊断。
 
 模型和训练参数集中在 `config.py` 的 `ModelConfig` 与 `TrainingConfig`。新训练直接读取这些默认值，续训恢复检查点中的配置；仅运行方式开关 `preload_to_gpu` 始终读取当前 `config.py`。参考字数量在 `min_references` 到 `max_references` 之间均匀采样；数据准备默认至少保留 `max_references + 1` 个不同字符的书写者。数据准备与完整单卡训练流程的使用方式见 [训练说明](../TRAINING.md)。网络尺寸与训练超参数仍需通过真实数据实验验证。
