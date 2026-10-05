@@ -67,11 +67,11 @@ class TrainingConfig:
     """Edit these defaults for a new run; resume restores saved settings."""
 
     steps: int = 100_000
-    batch_size: int = 8
-    accumulation_steps: int = 4
+    batch_size: int = 32
+    accumulation_steps: int = 1
     min_references: int = 1               # Inclusive lower bound
     max_references: int = 16              # Sample reference count uniformly up to this
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-4
     min_lr_ratio: float = 0.1
     warmup_steps: int = 1_000
     weight_decay: float = 0.01

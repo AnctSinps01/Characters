@@ -141,15 +141,46 @@ def atomic_save(payload, path):
     temporary.replace(path)
 
 
-def run(args):
-    device_name = args.device
+def resolve_device(device_name: str) -> torch.device:
+    """Select an explicit CUDA index before capability checks or allocations."""
     if device_name == "auto":
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
     if device.type not in ("cpu", "cuda"):
         raise ValueError("this trainer supports cpu or a single cuda device")
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise ValueError("CUDA unavailable; install a CUDA PyTorch build on the GPU server")
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA unavailable; install a CUDA PyTorch build on the GPU server")
+        if device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        torch.cuda.set_device(device)
+    return device
+
+
+def is_unstarted_run(output: Path, settings: dict, fingerprint: str) -> bool:
+    """Allow retry of matching startup metadata, never overwrite training results."""
+    metadata = output / "run.json"
+    try:
+        previous = json.loads(metadata.read_text(encoding="utf-8"))
+        if not isinstance(previous, dict):
+            return False
+        if previous.get("settings") != settings or previous.get("data_fingerprint") != fingerprint:
+            return False
+        for entry in output.iterdir():
+            if entry.is_symlink():
+                return False
+            if entry == metadata:
+                continue
+            if entry.name == "previews" and entry.is_dir() and not any(entry.iterdir()):
+                continue
+            return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def run(args):
+    device = resolve_device(args.device)
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
     if checkpoint is not None and checkpoint.get("version") != 1:
         raise ValueError("unsupported checkpoint version")
@@ -179,7 +210,8 @@ def run(args):
     if workers < 0:
         raise ValueError("workers must be nonnegative")
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
-        raise ValueError("output is nonempty; use --resume or choose a new output directory")
+        if not is_unstarted_run(args.output, settings, fingerprint):
+            raise ValueError("output is nonempty; use --resume or choose a new output directory")
     if (args.resume and args.output.exists() and any(args.output.iterdir())
             and not (args.output / "run.json").exists()):
         raise ValueError("nonempty resume output has no run.json; choose a new directory")
@@ -200,7 +232,6 @@ def run(args):
     }, indent=2), encoding="utf-8")
     torch.manual_seed(config.seed)
     if device.type == "cuda":
-        torch.cuda.set_device(device)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     model = Glyph2Hand(model_config).to(device).train()

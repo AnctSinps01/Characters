@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout
+from dataclasses import asdict
 import io
 import json
 import os
@@ -18,8 +19,8 @@ from torch.utils.data import DataLoader
 
 from src.prepare_data import prepare
 from src import ModelConfig, TrainingConfig
-from src.data import HandwritingEpisodes, iter_gnt, normalize_image
-from src.train import learning_rate, optimizer_update, run
+from src.data import HandwritingEpisodes, iter_gnt, normalize_image, read_manifest
+from src.train import is_unstarted_run, learning_rate, optimizer_update, resolve_device, run
 
 
 def record(character="啊", width=5, height=7):
@@ -149,6 +150,57 @@ class TrainingTests(unittest.TestCase):
     def tearDownClass(cls):
         torch.set_num_threads(cls.threads)
 
+    def test_cuda_aliases_resolve_to_explicit_device(self):
+        with patch("torch.cuda.is_available", return_value=True), \
+             patch("torch.cuda.current_device", return_value=1) as current, \
+             patch("torch.cuda.set_device") as select:
+            for name, expected in (("cuda", "cuda:1"), ("auto", "cuda:1"), ("cuda:2", "cuda:2")):
+                with self.subTest(device=name):
+                    current.reset_mock()
+                    self.assertEqual(resolve_device(name), torch.device(expected))
+                    select.assert_called_with(torch.device(expected))
+                    if name == "cuda:2":
+                        current.assert_not_called()
+            select.reset_mock()
+            self.assertEqual(resolve_device("cpu"), torch.device("cpu"))
+            select.assert_not_called()
+        with patch("torch.cuda.is_available", return_value=False), \
+             patch("torch.cuda.set_device") as select:
+            self.assertEqual(resolve_device("auto"), torch.device("cpu"))
+            with self.assertRaisesRegex(ValueError, "CUDA unavailable"):
+                resolve_device("cuda")
+            select.assert_not_called()
+
+    def test_cuda_selection_failure_leaves_no_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            args = argparse.Namespace(device="cuda", output=output)
+            with patch("torch.cuda.is_available", return_value=True), \
+                 patch("torch.cuda.current_device", return_value=0), \
+                 patch("torch.cuda.set_device", side_effect=RuntimeError("device initialization failed")), \
+                 patch("torch.cuda.is_bf16_supported") as bf16:
+                with self.assertRaisesRegex(RuntimeError, "device initialization failed"):
+                    run(args)
+                bf16.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_retry_does_not_overwrite_existing_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "previews").mkdir()
+            (output / "run.json").write_text(json.dumps({
+                "settings": {"seed": 1}, "data_fingerprint": "dataset",
+            }), encoding="utf-8")
+            self.assertTrue(is_unstarted_run(output, {"seed": 1}, "dataset"))
+            self.assertFalse(is_unstarted_run(output, {"seed": 2}, "dataset"))
+            self.assertFalse(is_unstarted_run(output, {"seed": 1}, "other-dataset"))
+            for name in ("last.pt", "best.pt", "metrics.jsonl", "previews/image.png", "notes.txt"):
+                artifact = output / name
+                artifact.write_bytes(b"existing result")
+                self.assertFalse(is_unstarted_run(output, {"seed": 1}, "dataset"))
+                self.assertEqual(artifact.read_bytes(), b"existing result")
+                artifact.unlink()
+
     def test_schedule_boundaries(self):
         config = TrainingConfig(steps=10, warmup_steps=2)
         self.assertAlmostEqual(learning_rate(1, config), config.learning_rate / 2)
@@ -196,6 +248,13 @@ class TrainingTests(unittest.TestCase):
                      patch("src.train.TrainingConfig", return_value=config):
                     run(args)
                     args.output = root / "split"
+                    # Reproduce the failed cloud startup: metadata and an empty
+                    # preview directory already exist, but no training happened.
+                    (args.output / "previews").mkdir(parents=True)
+                    (args.output / "run.json").write_text(json.dumps({
+                        "settings": {"model": asdict(model), "training": asdict(config)},
+                        "data_fingerprint": read_manifest(data)[1], "device": "cuda",
+                    }), encoding="utf-8")
                     args.stop_after = 1
                     run(args)
                 # Restore the actual (different) defaults before resuming. Saved
