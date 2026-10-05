@@ -8,7 +8,7 @@ from .reference_encoder import ReferenceEncoder
 
 
 class Glyph2Hand(nn.Module):
-    """End-to-end reference encoder and conditional flow velocity model."""
+    """Reference-conditioned velocity model; the target glyph only seeds the flow."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -30,16 +30,14 @@ class Glyph2Hand(nn.Module):
         self,
         state: Tensor,
         times: Tensor,
-        target_standard: Tensor,
         style: Tensor,
     ) -> Tensor:
-        return self.generator(state, times, target_standard, style)
+        return self.generator(state, times, style)
 
     def forward(
         self,
         state: Tensor,
         times: Tensor,
-        target_standard: Tensor,
         reference_handwriting: Tensor,
         reference_standard: Tensor,
         reference_mask: Tensor | None = None,
@@ -47,4 +45,4 @@ class Glyph2Hand(nn.Module):
         style = self.encode_style(
             reference_handwriting, reference_standard, reference_mask
         )
-        return self.predict_velocity(state, times, target_standard, style)
+        return self.predict_velocity(state, times, style)

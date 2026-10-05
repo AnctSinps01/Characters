@@ -63,19 +63,40 @@ class ArchitectureTests(unittest.TestCase):
             target_standard, target_handwriting, model.config.sigma
         )
 
-        predicted = model(
-            flow_batch.state,
-            flow_batch.times,
-            target_standard,
-            reference_handwriting,
-            reference_standard,
+        patch_inputs = []
+        hook = model.generator.patch_embed.register_forward_pre_hook(
+            lambda module, inputs: patch_inputs.append(inputs[0].detach().clone())
         )
+        try:
+            predicted = model(
+                flow_batch.state,
+                flow_batch.times,
+                reference_handwriting,
+                reference_standard,
+            )
+        finally:
+            hook.remove()
         loss = flow_matching_loss(predicted, flow_batch.target_velocity)
         loss.backward()
 
         self.assertEqual(predicted.shape, target_handwriting.shape)
         self.assertEqual(loss.ndim, 0)
         self.assertIsNotNone(model.generator.final.projection.weight.grad)
+        self.assertEqual(len(patch_inputs), 1)
+        torch.testing.assert_close(patch_inputs[0], flow_batch.state)
+
+    def test_euler_sampler_keeps_standard_as_initial_state(self) -> None:
+        model = Glyph2Hand(tiny_config()).eval()
+        references = torch.randn(1, 1, 1, 16, 16)
+        standards = torch.randn_like(references)
+        target = torch.linspace(-0.5, 0.5, 256).reshape(1, 1, 16, 16)
+        noise = torch.ones_like(target)
+
+        # The zero-initialized velocity head leaves the initial image unchanged.
+        result = sample_euler(
+            model, target, references, standards, steps=3, noise=noise
+        )
+        torch.testing.assert_close(result, target + model.config.sigma * noise)
 
     def test_euler_sampler_returns_bounded_images(self) -> None:
         torch.manual_seed(13)

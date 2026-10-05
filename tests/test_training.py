@@ -22,7 +22,8 @@ from torch.utils.data import DataLoader
 from src.prepare_data import prepare
 from src import ModelConfig, TrainingConfig
 from src.data import HandwritingEpisodes, PreloadedGlyphs, iter_gnt, normalize_image, read_manifest
-from src.train import is_unstarted_run, learning_rate, optimizer_update, resolve_device, run
+from src.train import (is_unstarted_run, learning_rate, metrics_json,
+                       optimizer_update, resolve_device, run)
 
 
 def record(character="啊", width=5, height=7):
@@ -303,6 +304,39 @@ class TrainingTests(unittest.TestCase):
         self.assertAlmostEqual(learning_rate(2, config), config.learning_rate)
         self.assertAlmostEqual(learning_rate(10, config), config.learning_rate * config.min_lr_ratio)
 
+    def test_old_prompt_channel_checkpoint_is_rejected_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "old.pt"
+            torch.save({"version": 1}, checkpoint)
+            output = root / "new_run"
+            args = argparse.Namespace(device="cpu", resume=checkpoint, output=output)
+            with self.assertRaisesRegex(ValueError, "removed target-standard input channel"):
+                run(args)
+            self.assertFalse(output.exists())
+
+    def test_metrics_json_has_bounded_precision_and_units(self):
+        line = metrics_json({
+            "step": 7220,
+            "train_loss": 0.6108397245407104,
+            "lr": 0.00029737878008084513,
+            "grad_norm": 1.5258227801325568e16,
+            "elapsed": "2287.18407843 s",
+            "peak_allocated": "3.69401121 GB",
+        })
+        self.assertEqual(
+            line,
+            '{"step": 7220, "train_loss": 0.61083972, "lr": 0.00029738, '
+            '"grad_norm": 1.52582278e+16, "elapsed": "2287.18407843 s", '
+            '"peak_allocated": "3.69401121 GB"}',
+        )
+        parsed = json.loads(line)
+        self.assertIsInstance(parsed["train_loss"], float)
+        self.assertEqual(parsed["peak_allocated"], "3.69401121 GB")
+
+        with self.assertRaisesRegex(ValueError, "must be finite"):
+            metrics_json({"train_loss": float("nan")})
+
     def test_scaler_overflow_retries_without_advancing_optimizer_or_noise(self):
         model = torch.nn.Linear(1, 1)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -361,6 +395,7 @@ class TrainingTests(unittest.TestCase):
             full = torch.load(root / "full/last.pt", weights_only=True)
             resumed = torch.load(root / "split/last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 3)
+            self.assertEqual(resumed["version"], 2)
             self.assertNotIn("preload_to_gpu", resumed["settings"]["training"])
             for section in ("model", "ema"):
                 for name in full[section]:

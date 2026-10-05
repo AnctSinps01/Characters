@@ -70,7 +70,7 @@ def sample_euler(
     noise: Tensor | None = None,
     reference_mask: Tensor | None = None,
 ) -> Tensor:
-    """Encode references once, then integrate the learned velocity from t=0 to t=1."""
+    """Integrate from target_standard + noise; only state/time/style reach the model."""
 
     if steps <= 0:
         raise ValueError("steps must be positive")
@@ -95,6 +95,6 @@ def sample_euler(
             device=state.device,
             dtype=state.dtype,
         )
-        velocity = model.predict_velocity(state, times, target_standard, style)
+        velocity = model.predict_velocity(state, times, style)
         state = state + step_size * velocity
     return state.clamp(-1, 1)

@@ -52,6 +52,8 @@ python -m src.train --data data/prepared --output runs/first --device cuda --sto
 
 续训使用检查点保存的配置；修改 `src/config.py` 只影响新训练。
 
+当前架构已移除生成主干的目标标准字提示通道，检查点版本为 2。版本 1 的旧检查点输入层尺寸不同，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的预处理数据仍可复用，目标标准字继续用于构造流的加噪起点，参考字仍使用手写/标准字对。
+
 ```bash
 python -m src.train --data data/prepared --output runs/first --resume runs/first/last.pt --device cuda
 ```

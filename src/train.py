@@ -40,9 +40,34 @@ def move_batch(batch, device):
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
 
+def metrics_json(metrics: dict) -> str:
+    """Serialize one compact, human-readable metrics record.
+
+    Unitless floats remain JSON numbers so analysis tools can read them directly.
+    Eight decimal places are used at ordinary scales; very large or very small
+    values use scientific notation to avoid unwieldy log lines.
+    """
+    fields = []
+    for key, value in metrics.items():
+        encoded_key = json.dumps(key)
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError(f"metric {key!r} must be finite")
+            magnitude = abs(value)
+            encoded_value = (
+                f"{value:.8e}"
+                if magnitude >= 1e8 or 0 < magnitude < 1e-7
+                else f"{value:.8f}"
+            )
+        else:
+            encoded_value = json.dumps(value)
+        fields.append(f"{encoded_key}: {encoded_value}")
+    return "{" + ", ".join(fields) + "}"
+
+
 def batch_loss(model, batch):
     flow = build_flow_matching_batch(batch["target_standard"], batch["target_handwriting"], model.config.sigma)
-    prediction = model(flow.state, flow.times, batch["target_standard"],
+    prediction = model(flow.state, flow.times,
                        batch["reference_handwriting"], batch["reference_standard"],
                        batch["reference_mask"])
     # Accumulate the MSE in float32 even under autocast.
@@ -195,7 +220,12 @@ def run(args):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
-    if checkpoint is not None and checkpoint.get("version") != 1:
+    if checkpoint is not None and checkpoint.get("version") == 1:
+        raise ValueError(
+            "checkpoint version 1 uses the removed target-standard input channel; "
+            "start a new run without --resume in a new output directory"
+        )
+    if checkpoint is not None and checkpoint.get("version") != 2:
         raise ValueError("unsupported checkpoint version")
     if checkpoint is not None:
         settings = checkpoint["settings"]
@@ -309,7 +339,7 @@ def run(args):
 
     def save(name):
         atomic_save({
-            "version": 1, "settings": settings, "data_fingerprint": fingerprint,
+            "version": 2, "settings": settings, "data_fingerprint": fingerprint,
             "step": completed, "best_val_loss": best,
             "model": model.state_dict(), "ema": ema.state_dict(),
             "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
@@ -333,7 +363,8 @@ def run(args):
                     averaged.lerp_(current, 1 - config.ema_decay)
             completed = step
             metrics = {"step": step, "train_loss": total_loss, "lr": lr,
-                       "grad_norm": grad_norm, "elapsed_seconds": time.monotonic() - start}
+                       "grad_norm": grad_norm,
+                       "elapsed": f"{time.monotonic() - start:.8f} s"}
             final = step == stop_step or interrupted
             improved = False
             if not interrupted and (step % config.validate_every == 0 or final):
@@ -344,8 +375,9 @@ def run(args):
                 best = min(best, val_loss)
             if step % config.log_every == 0 or "val_loss_ema" in metrics or final:
                 if device.type == "cuda":
-                    metrics["peak_allocated_gb"] = torch.cuda.max_memory_allocated(device) / 1024**3
-                line = json.dumps(metrics)
+                    allocated_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+                    metrics["peak_allocated"] = f"{allocated_gb:.8f} GB"
+                line = metrics_json(metrics)
                 print(line, flush=True)
                 with (args.output / "metrics.jsonl").open("a", encoding="utf-8") as stream:
                     stream.write(line + "\n")

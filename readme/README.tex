@@ -97,7 +97,7 @@
 \vspace{4pt}
 {\large 分层参考编码与条件流匹配：架构图与设计说明}\par
 \vspace{3pt}
-{\small 2026 年 10 月 4 日\quad 三阶段参考编码与标准字起点 flow}
+{\small 2026 年 10 月 5 日\quad 三阶段参考编码与标准字起点 flow}
 \end{center}
 
 \section{任务、范围与核心假设}
@@ -126,6 +126,7 @@
 这一假设和压缩容量需要通过实验验证；当前文档与 \texttt{src} 中的模型骨架保持一致，尚无训练或效果结论。
 
 生成分支暂按“目标标准字加噪声作为起点”的像素空间 flow 写出完整公式。
+目标标准字仅用于构造起点，不作为主干的独立提示通道；速度网络的输入为当前状态 $x_t$、时间 $t$ 和参考风格 $S$。
 噪声强度、各层数和 token 数量均为可调实验超参数，尚未由实验确定。
 
 
@@ -206,16 +207,14 @@
   {生成：$L=(n/p)^2$ 个目标 token，全程保留空间位置};
 \draw[draw=diagorange!50,fill=diagorange!2,rounded corners=4pt] (6.12,-11.1) rectangle (10.72,-20.67);
 \node[font=\scriptsize,text=diagorange,anchor=west,align=left] at (11,-11.55) {DiT block\\$\times B_{\rm gen}$};
-\glyphsample{xt}{7.45,-10.55}{沐}{diagorange}{$x_t$}{-3}{\kaishu}
-\glyphsample{kg}{8.55,-10.55}{沐}{diagink}{$K_\star$}{0}{\yahei}
-\draw[diagorange!35,line width=.6pt] (7.18,-10.36)--(7.7,-10.75);
-\draw[diagorange!35,line width=.6pt] (7.2,-10.76)--(7.68,-10.34);
+\glyphsample{xt}{8,-10.55}{沐}{diagorange}{$x_t$}{-3}{\kaishu}
+\draw[diagorange!35,line width=.6pt] (7.73,-10.36)--(8.25,-10.75);
+\draw[diagorange!35,line width=.6pt] (7.75,-10.76)--(8.23,-10.34);
 \node[font=\scriptsize,anchor=east] at (6.65,-10.31) {$x_0=K_\star+\sigma\epsilon$};
 \draw[timelink] (6.2,-10.55)--(xt.west);
-\draw[diagorange!70,line width=.55pt] (xt.south)--(7.45,-11.1)--(8.55,-11.1)--(kg.south);
 \vtokenbank{t0}{8,-11.58}{.46}{5}{diagorange}{$T$\\$L\times d$}{}
-\draw[flow,line width=.55pt] (8,-11.1)--(t0.north);
-\node[font=\tiny,text=diagink,anchor=west] at (8.7,-10.91) {patch：$2p^2\to d$};
+\draw[flow,line width=.55pt] (xt.south)--(t0.north);
+\node[font=\tiny,text=diagink,anchor=west] at (8.7,-10.91) {单通道 patch：$p^2\to d$};
 % Shared time embedding, one separate 6d projection per block.
 \node[queryblock,font=\scriptsize,minimum height=.33cm,inner sep=2pt] (time) at (2.8,-9.97) {$t\in[0,1]$};
 \node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (tembed) at (2.8,-10.62) {sin/cos + 两层 MLP};
@@ -505,12 +504,14 @@ $N=1$ 时，$M$ 个查询直接读取唯一一组的 $Z$ 个描述，不需要�
 
 \subsection{目标 patch 与主干结构}
 
-采用带风格交叉注意力的 DiT 主干。在每个时刻，将当前图像与干净目标标准字沿通道拼接：
+采用带风格交叉注意力的 DiT 主干。在每个时刻，仅将当前单通道图像 $x_t$ 分块并投影：
 \[
-T^{(0)}=\operatorname{PatchEmbed}_{\mathrm{gen}}([x_t,K_\star])+P_{xy}
+T^{(0)}=\operatorname{PatchEmbed}_{\mathrm{gen}}(x_t)+P_{xy}
 \in\R^{L\times d}.
 \]
-主干始终保留 $L=(n/p)^2$ 个空间 token；参考分支与目标分支的分块投影不共享参数。
+每个目标块的输入为 $p^2$ 维，投影为 $d$ 维；主干始终保留 $L=(n/p)^2$ 个空间 token。
+目标标准字 $K_\star$ 仅参与构造起点 $x_0$，不再独立输入速度网络。
+参考分支仍将 $H_i,K_i$ 成对拼接，参考分支与目标分支的分块投影不共享参数。
 每个 block 依次执行目标自注意力 SA、读取 $S$ 的交叉注意力 CA，以及逐 token FFN。
 此处 SA、CA 表示独立的注意力子层，FFN 单独列出；不重复套用参考分支中包含 FFN 的复合块定义。
 
@@ -562,7 +563,7 @@ L\times p^2
 \]
 沿用原始 DiT 的输出头初始化，时间调节映射与最终 patch 线性映射均零初始化。
 输出矩阵只有 $d\times p^2$ 个权重，不随 $L$ 增长；不存在把整图压成一个 token 后再解码的步骤。
-输出是当前灰度状态的像素速度，而不是最终字图；$K_\star$ 是额外输入条件，不占用输出通道。
+输出是当前灰度状态的像素速度，而不是最终字图；速度网络记作 $v_\theta(x_t,t,S)$，输入与输出图像均为单通道。
 
 \subsection{训练路径：标准字加噪声到手写真值}
 
@@ -575,29 +576,32 @@ x_0&=K_\star+\sigma\epsilon,\\
 x_t&=(1-t)x_0+tH_\star,\\
 u&=H_\star-x_0,\\
 \mathcal L&=\mathbb E\left[\frac{1}{n^2}
-\left\|v_\theta(x_t,t,K_\star,S)-u\right\|_F^2\right].
+\left\|v_\theta(x_t,t,S)-u\right\|_F^2\right].
 \end{align*}
 同一个 $x_0$ 同时用于构造 $x_t$ 和监督速度 $u$。
-干净标准字 $K_\star$ 始终作为条件提供；$H_\star$ 仅通过训练状态与监督目标参与训练。
+目标标准字 $K_\star$ 通过起点及训练状态影响速度预测，不作为独立通道提供；$H_\star$ 仅通过训练状态与监督目标参与训练。
 参考分支的所有可学习查询、编码器和生成主干均由该损失联合训练。
 本稿尚未引入额外的笔画标注损失、风格解耦损失或重建损失。
 
 这里的加噪是以标准字为均值的加性高斯扰动，不是把图像与噪声做权重和为 $1$ 的混合。
 $x_0$ 可能超出 $[-1,1]$；训练状态和积分中间状态均不裁剪。
 训练和推理必须使用相同的起点分布；不能仅在推理时替换纯噪声起点。
+当前像素线性插值定义的是训练路径，不保证中间状态是自然字形，也不把 $t$ 定义为手写风格强度。
 
 \subsection{推理与随机性}
 
-先计算 $S$，再采样 $x_0=K_\star+\sigma\epsilon$，固定 $S,K_\star$ 并求解
+先计算 $S$，再采样 $x_0=K_\star+\sigma\epsilon$，固定 $S$ 并求解
 \[
-\frac{dx_t}{dt}=v_\theta(x_t,t,K_\star,S),\qquad t:0\longrightarrow1.
+\frac{dx_t}{dt}=v_\theta(x_t,t,S),\qquad t:0\longrightarrow1.
 \]
 暂采用 $J$ 步等步长 Euler 积分：
 \[
-t_j=j/J,\qquad x_{t_{j+1}}=x_{t_j}+\frac1Jv_\theta(x_{t_j},t_j,K_\star,S).
+t_j=j/J,\qquad x_{t_{j+1}}=x_{t_j}+\frac1Jv_\theta(x_{t_j},t_j,S).
 \]
 仅在最后把 $x_1$ 裁剪至 $[-1,1]$ 并映射回灰度范围，得到 $\widehat H_\star$。
 除初始噪声外，生成过程不引入额外随机量。
+各步只能从当前状态读取目标字信息，不再额外读取干净目标标准字。
+生成输入层由双通道改为单通道；旧版双通道检查点不能直接续训，当前训练检查点版本为 $2$。
 
 当参考、目标和噪声固定时，输出确定。$\sigma=0$ 可另作确定性迁移对照，
 但同一条件下的确定性 ODE 无法产生多个不同写法。
