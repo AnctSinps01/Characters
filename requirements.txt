@@ -1,0 +1,5 @@
+# Install the CUDA build of PyTorch separately on the GPU server (see TRAINING.md).
+torch>=2.3,<3
+numpy>=1.26,<3
+Pillow>=10,<13
+fonttools>=4.50,<5

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass(frozen=True, slots=True)
@@ -10,7 +11,7 @@ class ModelConfig:
     image_size: int = 64
     patch_size: int = 8
     in_channels: int = 1
-    hidden_size: int = 128
+    hidden_size: int = 256
     num_heads: int = 8
     mlp_ratio: float = 4.0                  # FNN hidden dim
     local_depth: int = 4
@@ -59,3 +60,48 @@ class ModelConfig:
     @property
     def patch_count(self) -> int:
         return self.grid_size**2
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingConfig:
+    """Edit these defaults for a new run; resume restores saved settings."""
+
+    steps: int = 100_000
+    batch_size: int = 8
+    accumulation_steps: int = 4
+    min_references: int = 1               # Inclusive lower bound
+    max_references: int = 16              # Sample reference count uniformly up to this
+    learning_rate: float = 1e-4
+    min_lr_ratio: float = 0.1
+    warmup_steps: int = 1_000
+    weight_decay: float = 0.01
+    gradient_clip: float = 1.0
+    ema_decay: float = 0.999
+    precision: str = "bf16"
+    workers: int = 4
+    val_batches: int = 16
+    validate_every: int = 1_000
+    save_every: int = 500
+    log_every: int = 20
+    sample_steps: int = 32
+    seed: int = 42
+
+    def __post_init__(self):
+        for name in ("steps", "batch_size", "accumulation_steps", "min_references",
+                     "max_references", "val_batches", "validate_every", "save_every",
+                     "log_every", "sample_steps"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not 0 <= self.warmup_steps < self.steps or self.workers < 0:
+            raise ValueError("expected 0 <= warmup_steps < steps and workers >= 0")
+        if self.min_references > self.max_references:
+            raise ValueError("min_references cannot exceed max_references")
+        for name in ("learning_rate", "gradient_clip"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if not 0 <= self.min_lr_ratio <= 1 or not 0 <= self.ema_decay < 1:
+            raise ValueError("invalid min_lr_ratio or ema_decay")
+        if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
+            raise ValueError("weight_decay must be finite and nonnegative")
+        if self.precision not in ("fp32", "fp16", "bf16"):
+            raise ValueError("precision must be fp32, fp16 or bf16")
