@@ -1,44 +1,44 @@
 # 训练操作
 
-以下路径都相对于这个项目目录，所有命令都在项目根目录（有 `src`、`requirements.txt` 的这一层）运行。
+所有命令都在 `DiT-flow/` 内（有 `src/` 的这一层）运行，先从仓库根目录执行 `cd DiT-flow`。以下路径相对于 `DiT-flow/`；公共依赖、字体、原始数据和预处理数据位于上一级仓库根目录，训练结果使用根目录下的 `runs/DiT-flow/`。
 
 ## 1. 新建文件夹，放入文件
 
 | 新建路径 | 放什么 |
 |---|---|
-| `fonts/` | 放入文津宋体标准版 [WenJinMinchoP0-Regular.ttf](https://github.com/takushun-wu/WenJinMincho/blob/main/ttf/WenJinMinchoP0-Regular.ttf)，打开链接后点击 Download raw file 下载 |
-| `data/gnt/` | 放入下面两个训练集压缩包解压得到的 `.gnt` 文件，保留原文件名；不要放 Test 数据 |
+| `../fonts/` | 放入文津宋体标准版 [WenJinMinchoP0-Regular.ttf](https://github.com/takushun-wu/WenJinMincho/blob/main/ttf/WenJinMinchoP0-Regular.ttf)，打开链接后点击 Download raw file 下载 |
+| `../data/gnt/` | 放入下面两个训练集压缩包解压得到的 `.gnt` 文件，保留原文件名；不要放 Test 数据 |
 
-训练集：[Part1](https://nlpr.ia.ac.cn/databases/Download/Offline/CharData/Gnt1.1TrainPart1.zip)、[Part2](https://nlpr.ia.ac.cn/databases/Download/Offline/CharData/Gnt1.1TrainPart2.zip)。数据可以等复制到服务器后再下载、解压到 `data/gnt/`。
+训练集：[Part1](https://nlpr.ia.ac.cn/databases/Download/Offline/CharData/Gnt1.1TrainPart1.zip)、[Part2](https://nlpr.ia.ac.cn/databases/Download/Offline/CharData/Gnt1.1TrainPart2.zip)。数据可以等复制到服务器后再下载、解压到 `../data/gnt/`。
 
 ## 2. 复制项目，安装依赖
 
-把整个项目目录复制到 GPU 服务器。选择带 Python 3.10+、CUDA 版 PyTorch 2.3+ 的环境，进入复制后的项目根目录：
+把整个仓库目录复制到 GPU 服务器。选择带 Python 3.10+、CUDA 版 PyTorch 2.3+ 的环境，进入复制后的 `DiT-flow/`：
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r ../requirements.txt
 python -c "import torch; assert torch.cuda.is_available(); assert torch.cuda.is_bf16_supported(); print(torch.cuda.get_device_name(0))"
 ```
 
 ## 3. 处理数据（只运行一次）
 
 ```bash
-python -m src.prepare_data --gnt-root data/gnt --font fonts/WenJinMinchoP0-Regular.ttf --output data/prepared
+python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0-Regular.ttf --output ../data/prepared
 ```
 
-自动生成 `data/prepared/`：`writers/` 放手写图，`standards.npy` 放标准字图，`manifest.json` 放样本清单和训练/验证划分。首次运行时该目录应不存在或为空。
+自动生成 `../data/prepared/`：`writers/` 放手写图，`standards.npy` 放标准字图，`manifest.json` 放样本清单和训练/验证划分。首次运行时该目录应不存在或为空。
 
 ## 4. 先训练 100 步
 
 模型和训练参数直接改 `src/config.py`。每个样本在 `min_references` 到 `max_references` 之间均匀随机抽参考字数。图像尺寸和参考数量上限请在处理数据前确定。
 
-训练启动时自动把 `data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。更新训练代码后无需重新 prepare。
+训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。更新训练代码后无需重新 prepare。
 
 ```bash
-python -m src.train --data data/prepared --output runs/first --device cuda --stop-after 100
+python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --device cuda --stop-after 100
 ```
 
-自动生成 `runs/first/`，首次运行时该目录应不存在或为空：
+自动生成 `../runs/DiT-flow/first/`，首次运行时该目录应不存在或为空：
 
 | 文件 | 内容 |
 |---|---|
@@ -56,10 +56,12 @@ python -m src.train --data data/prepared --output runs/first --device cuda --sto
 当前架构已移除生成主干的目标标准字提示通道，检查点版本为 2。版本 1 的旧检查点输入层尺寸不同，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的预处理数据仍可复用，目标标准字继续用于构造流的加噪起点，参考字仍使用手写/标准字对。
 
 ```bash
-python -m src.train --data data/prepared --output runs/first --resume runs/first/last.pt --device cuda
+python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --resume ../runs/DiT-flow/first/last.pt --device cuda
 ```
 
-按 `Ctrl+C` 后等保存完成再退出。训练结果都在本项目的 `runs/first/`，退租前复制回来。
+按 `Ctrl+C` 后等保存完成再退出。训练结果都在仓库根目录的 `runs/DiT-flow/first/`，退租前复制回来。
+
+目录迁移不改变检查点格式。已有 `data/prepared/` 无需重做；已有 `runs/first/last.pt` 可以通过 `--output ../runs/first --resume ../runs/first/last.pt` 继续原实验，无需把旧结果搬到新的示例目录。
 
 ## 6. 排查梯度异常
 
@@ -75,13 +77,13 @@ python -m src.train --data data/prepared --output runs/first --resume runs/first
 
 ## 7. 检查点写入失败
 
-如果训练/验证指标已打印，随后在 `torch.save` 出现 `Input/output error`、`iostream error` 或 `PytorchStreamWriter failed`，失败点是检查点写入；这段堆栈本身不表示梯度爆炸。固定在保存步数复现时，优先检查输出盘的空间、用户/平台配额、inode 和挂载状态。在云主机项目根目录运行（将目录换成实际运行目录）：
+如果训练/验证指标已打印，随后在 `torch.save` 出现 `Input/output error`、`iostream error` 或 `PytorchStreamWriter failed`，失败点是检查点写入；这段堆栈本身不表示梯度爆炸。固定在保存步数复现时，优先检查输出盘的空间、用户/平台配额、inode 和挂载状态。在云主机的 `DiT-flow/` 内运行（将目录换成实际运行目录）：
 
 ```bash
-df -h runs/first
-df -i runs/first
-ls -lh runs/first/*.pt*
-du -sh runs/first
+df -h ../runs/DiT-flow/first
+df -i ../runs/DiT-flow/first
+ls -lh ../runs/DiT-flow/first/*.pt*
+du -sh ../runs/DiT-flow/first
 ```
 
 `df` 的文件系统剩余空间不一定反映用户或平台的单独配额，还需检查平台存储用量。保存时先写完整的 `last.pt.tmp` 或 `best.pt.tmp`，再替换旧文件，因此除了已有检查点，还需要至少一份完整检查点的额外空间并留有余量。训练进程已退出时，可清理确认是失败保存遗留的 `.pt.tmp`；保留可加载的 `.pt`。

@@ -331,7 +331,7 @@ z_s=\sqrt{\bar\alpha_s}\hat z_0+
 | 训练目标 | ε MSE + 两个 SupCon；后续加 CTC | 当前仅速度 MSE |
 | 推理参考缓存 | 数学上可缓存，代码未做 | Euler 循环外编码一次 S |
 
-Glyph2Hand 默认配置当前是 Z=32、M=32、d=256，参考数在 1–16 间采样。当前 README 某些叙述仍写 1–8，做实验应以实际配置为准。
+Glyph2Hand 默认配置当前是 Z=32、M=32、d=256，参考数在 1–16 间采样。目录调整后，其实现位于 `DiT-flow/`；做实验应以该目录中的实际配置为准。
 
 Glyph2Hand 起点是目标标准字加小噪声：
 
@@ -346,7 +346,7 @@ x_0=K_\star+\sigma\epsilon,
 
 One-DM 的风格对比目标则给当前项目一个直接问题：如果只有像素速度损失，生成器是否会主要利用标准字起点，弱化参考风格？可用固定目标和噪声、交换作者参考的实验检查，而非只看训练损失下降。
 
-依据：[Glyph2Hand 参考编码](E:/Codes/torch/Characters/src/reference_encoder.py:95)、[flow 路径](E:/Codes/torch/Characters/src/flow.py:48)、[推理缓存](E:/Codes/torch/Characters/src/flow.py:85)。
+依据：[Glyph2Hand 参考编码](../DiT-flow/src/reference_encoder.py)、[flow 路径](../DiT-flow/src/flow.py)、[推理缓存](../DiT-flow/src/flow.py)。
 
 ## 12. 最值得借鉴和优先验证的部分
 

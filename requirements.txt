@@ -1,4 +1,4 @@
-# Install the CUDA build of PyTorch separately on the GPU server (see TRAINING.md).
+# Install the CUDA build of PyTorch separately on the GPU server (see DiT-flow/TRAINING.md).
 torch>=2.3,<3
 numpy>=1.26,<3
 Pillow>=10,<13
