@@ -7,8 +7,11 @@ import copy
 from dataclasses import asdict, replace
 import json
 import math
+import os
 from pathlib import Path
+import shutil
 import signal
+import sys
 import time
 
 from PIL import Image, ImageDraw
@@ -173,9 +176,53 @@ def evaluate(model, loader, device, precision, config, preview_path):
 
 
 def atomic_save(payload, path):
+    """Retry checkpoint I/O without replacing the last complete checkpoint."""
     temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, temporary)
-    temporary.replace(path)
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            # A Python stream exposes OS errors more clearly than PyTorch's
+            # filename-based C++ writer (which can report only iostream error).
+            with temporary.open("wb") as stream:
+                torch.save(payload, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+            return
+        except Exception as error:
+            # Failed archives are unusable and may consume the remaining space.
+            # Never remove the previous checkpoint to make room for a new one.
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                print(f"Could not remove incomplete checkpoint {temporary}: {cleanup_error}",
+                      file=sys.stderr, flush=True)
+            # Do not misreport unrelated serialization/model errors as disk I/O.
+            writer_error = isinstance(error, RuntimeError) and any(
+                marker in str(error).lower() for marker in (
+                    "iostream error", "pytorchstreamwriter failed", "unexpected pos",
+                )
+            )
+            if not isinstance(error, OSError) and not writer_error:
+                raise
+            try:
+                free = shutil.disk_usage(path.parent).free / 1024**3
+                storage = f"Filesystem free space after cleanup: {free:.3f} GiB. "
+            except OSError as usage_error:
+                storage = f"Could not query filesystem free space: {usage_error}. "
+            message = (
+                f"Checkpoint save failed ({attempt}/{attempts}) for {path}: "
+                f"{type(error).__name__}: {error}. "
+                "The previous checkpoint has not been replaced. "
+                f"{storage}Check disk space, user/platform quota, and mount health; "
+                "an atomic save needs space for an additional full checkpoint."
+            )
+            if attempt == attempts:
+                raise RuntimeError(message) from error
+            delay = 2 ** (attempt - 1)
+            print(f"{message} Retrying the same checkpoint in {delay} s.",
+                  file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def resolve_device(device_name: str) -> torch.device:
