@@ -20,8 +20,8 @@ import torch
 from twist import LossConfig, ModelConfig, Twist, registration_loss
 from twist.geometry import identity_grid, lipschitz_bound
 from twist.losses import soft_weighted_mse, source_distance_loss
+from twist.preview import save_preview
 from glyph_pair import load_glyphs
-from preview import save_inputs, save_preview
 from settings import TrainingConfig
 
 
@@ -114,7 +114,6 @@ def train(args):
         raise ValueError("--writer differs from the checkpoint")
     output.mkdir(parents=True, exist_ok=True)
     atomic_save(glyphs, output / "glyphs.pt")
-    save_inputs(glyphs, output)
     source, targets, distance = (glyphs[name].to(device) for name in ("source", "targets", "distance"))
     train_indices, val_indices = glyphs["train_indices"], glyphs["val_indices"]
     true_grid = glyphs["true_grid"].to(device) if glyphs["true_grid"] is not None else None
@@ -195,7 +194,7 @@ def train(args):
                 single_a, single_b, _ = batch(chunk[:1])
                 with precision_context():
                     single = model(single_a, single_b)
-                save_preview(single, single_b, output / "previews", step, training.animation_frames, split)
+                save_preview(single, output / "previews", step, training.animation_frames, split)
         values = {name: value / len(indices) for name, value in values.items()}
         if not all(math.isfinite(value) for value in values.values()):
             raise FloatingPointError("Nonfinite evaluation loss; inspect the previous saved step")

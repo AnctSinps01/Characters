@@ -14,7 +14,7 @@ class TrainingConfig:
     save_every: int = 1_000
     val_batches: int = 16         # 固定验证对数=val_batches*初始batch_size；0 为全部可配对验证源图。
     preview_samples: int = 4      # 固定预览的验证配对，尽量选不同字符。
-    animation_frames: int = 21    # GIF 总帧数，包含 t=0 和 t=1；静态横图固定 5 个时刻。
+    animation_frames: int = 21    # GIF 总帧数，包含 t=0 和 t=1。
     precision: str = "auto"      # CUDA 支持时用 bf16，否则 fp32；几何采样和 loss 保持 float32。
     preload_to_gpu: bool = False # 默认所有 uint8 字图驻内存；True 则所有字图驻训练显卡。
     distance_cache_size: int = 8192  # 源图距离场的内存缓存张数；64² 时上限约 128 MiB。

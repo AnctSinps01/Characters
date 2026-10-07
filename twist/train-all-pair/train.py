@@ -21,7 +21,7 @@ from twist import LossConfig, ModelConfig, Twist, registration_loss
 from twist.geometry import identity_grid, lipschitz_bound
 from twist.losses import soft_weighted_mse, source_distance_loss
 from twist.images import NORMALIZATION
-from twist.preview import save_preview, strip, tile
+from twist.preview import save_preview
 from pairs import PreparedPairs, ShuffledPairSampler
 from settings import TrainingConfig
 
@@ -157,12 +157,6 @@ def train(args):
     dump_json(output / "excluded_images.json", data.invalid_images)
     preview_descriptions = [data.describe(validation_pairs[i]) for i in previews.tolist()]
     dump_json(output / "preview_pairs.json", preview_descriptions)
-    inputs = []
-    for i in previews.tolist():
-        a, b, _ = data.batch(validation_pairs[i:i+1], device)
-        inputs.extend((tile(a, f"A: {data.describe(validation_pairs[i])['source_writer']}"),
-                       tile(b, f"B: {data.describe(validation_pairs[i])['target_writer']}")))
-    strip(inputs).save(output / "inputs.png")
     parameters = sum(parameter.numel() for parameter in model.parameters())
     run_info = {"model": asdict(model_config), "loss": asdict(loss_config), "training": asdict(training),
                 "data_root": str(data.root), "data_fingerprint": data.fingerprint, "handwriting_count": data.count,
@@ -249,7 +243,7 @@ def train(args):
                 with precision_context():
                     result = model(a, b)
                 char = data.describe(validation_pairs[i])["character"]
-                save_preview(result, b, output / "previews", step, training.animation_frames,
+                save_preview(result, output / "previews", step, training.animation_frames,
                              split=f"val_{position:02d}_u{ord(char):04x}")
         model.train()
 

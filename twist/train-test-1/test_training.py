@@ -20,8 +20,8 @@ sys.path.insert(0, str(HERE.parents[1]))
 
 from twist import LossConfig, ModelConfig, RegistrationResult
 from twist.geometry import identity_grid, lipschitz_bound, sample_image
+from twist.preview import save_preview
 from glyph_pair import load_glyphs
-from preview import save_preview
 from settings import TrainingConfig
 from train import parse_args, train
 
@@ -153,6 +153,7 @@ class TrainingTests(unittest.TestCase):
             self.assertTrue((root / "split" / "best.pt").is_file())
             with Image.open(root / "split" / "previews" / "step_0000005_val_trajectory.gif") as animation:
                 self.assertEqual(animation.n_frames, 3)
+            self.assertFalse(list((root / "split").rglob("*.png")))
             for metric in (summary["final"]["train"], summary["final"]["val"]):
                 self.assertTrue(all(bound <= 0.8 for bound in metric["stage_lipschitz_max"]))
             with self.assertRaisesRegex(ValueError, "nonempty"):
@@ -188,11 +189,10 @@ class TrainingTests(unittest.TestCase):
             result = RegistrationResult(source, (torch.zeros(1, 2, 6, 6),), (source,), (grid,))
             for frames in (7, TrainingConfig().animation_frames, 121):
                 output = Path(directory) / str(frames)
-                save_preview(result, source, output, 0, frames)
+                save_preview(result, output, 0, frames)
                 with Image.open(output / "step_0000000_train_trajectory.gif") as animation:
                     self.assertEqual(animation.n_frames, frames)
-                with Image.open(output / "step_0000000_train_trajectory.png") as contact:
-                    self.assertEqual(contact.width, 5 * 256)
+                self.assertEqual({path.suffix for path in output.iterdir()}, {".gif"})
 
 
 if __name__ == "__main__":

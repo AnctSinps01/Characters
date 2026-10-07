@@ -47,22 +47,20 @@ python twist/train-test-1/train.py --char 中 --writer 书写者ID --steps 200 -
 
 | 输出 | 内容 |
 |---|---|
-| `inputs.png`、`glyphs.pt` | 选中字的输入预览和全部缓存；续训无需再读取原始数据 |
+| `glyphs.pt` | 选中字的全部缓存；续训无需再读取原始数据 |
 | `run.json` | 配置、样本清单、train/val 数量和初始基线 |
 | `metrics.jsonl` | 三类 loss、形变子项、各阶段最大 Lipschitz 上界；`scope=batch` 为抽样批次，`scope=full` 为完整 train/val 评估 |
 | `best.pt`、`last.pt` | 最佳已保存评估步和最新保存步的模型/优化器/数据/随机状态；有验证集时按验证总 loss 选择 best |
-| `previews/*_compare.png` | A、B、端点输出、叠加误差；红色为输出，青色为 B，重合为黑色 |
-| `previews/*_stages.png` | 各串联阶段输出 |
-| `previews/*_trajectory.png` | 固定展示 t=0、0.25、0.5、0.75、1 的静态横图 |
 | `previews/*_trajectory.gif` | 自动保存的过渡动画；总帧数由 `settings.py` 的 `animation_frames` 控制，默认 21 帧，包含两个端点 |
-| `previews/*_grid.png` | 反向采样网格 |
 | `summary.json` | 最终指标与完成/中断状态 |
 
 第 0 步、每隔 100 步和结束时评估完整集合、保存检查点和预览；普通日志每 10 步记录更新后的抽样批次。预览固定展示 train/val 各自第一个样本，具体 ID 见 `run.json`。`Ctrl+C` 等当前更新结束后保存。新实验拒绝覆盖非空目录；从较早检查点恢复请指定新的输出目录。
 
 GIF 帧数也可运行时用 `--animation-frames 61` 覆盖。续训恢复检查点中的配置，要改变旧实验的帧数也使用这个参数。
 
-先看端点叠加图和验证 MSE 是否改善，再看中间轨迹。真实手写字可能有连接关系变化，不能保证纯连续形变达到零误差。此实验只验证单字配准，不验证跨字泛化。
+图片预览只保存 GIF，不保存输入、端点叠加、逐阶段或网格 PNG。
+
+先看 GIF 的端点和验证 MSE 是否改善，再看中间轨迹。真实手写字可能有连接关系变化，不能保证纯连续形变达到零误差。此实验只验证单字配准，不验证跨字泛化。
 
 本地检查：
 

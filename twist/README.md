@@ -15,7 +15,7 @@ CA 用 B 做 Q、当前 A 做 K/V，修改 B 的查询 token 并解码二维位�
 | [geometry.py](geometry.py) | 边界、Lipschitz 限制、连续场求值与反向采样 |
 | [distance.py](distance.py) | 原始图的距离场准备；计算一次后缓存 |
 | [losses.py](losses.py) | 软平衡 MSE、距离场和形变正则 |
-| [preview.py](preview.py) | 训练入口共用的端点、阶段、轨迹 GIF 与采样网格预览 |
+| [preview.py](preview.py) | 训练入口共用的轨迹 GIF 预览 |
 | [count_parameters.py](count_parameters.py) | 参数统计 |
 | tests/ | 几何约束、数据流、loss 梯度与混合精度验证 |
 | [train-test-1/](train-test-1/README.md) | 单字训练：缓存该字全部样本，train/val 评估、续训和轨迹预览 |

@@ -209,6 +209,7 @@ class PairTrainingTests(unittest.TestCase):
             self.assertEqual(len(descriptions), 2)
             with Image.open(next((root / "split" / "previews").glob("step_0000005_*_trajectory.gif"))) as gif:
                 self.assertEqual(gif.n_frames, 3)
+            self.assertFalse(list((root / "split").rglob("*.png")))
             manifest = json.loads((root / "data" / "manifest.json").read_text())
             manifest["changed"] = True
             (root / "data" / "manifest.json").write_text(json.dumps(manifest))
