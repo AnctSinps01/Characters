@@ -1,4 +1,4 @@
-"""Architecture and loss settings for the first twist implementation."""
+"""twist 首版的模型结构与损失配置。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,17 +7,17 @@ import math
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    image_size: int = 64
-    patch_size: int = 8
-    in_channels: int = 1
-    token_dim: int = 256
-    num_heads: int = 8
-    blocks_per_stage: int = 2       # Dual-stream attention blocks within one stage.
-    num_stages: int = 4             # Sequential registration stages.
-    mlp_ratio: float = 4.0
-    lipschitz_limit: float = 0.8
-    share_stage_weights: bool = False
-    head_init_std: float = 1e-3     # Small initial movement; gradients reach both streams.
+    image_size: int = 64           # 正方形输入图的边长，必须能被 patch_size 整除。
+    patch_size: int = 8            # 每个 patch 的边长；每张图有 (image_size / patch_size)² 个 token。
+    in_channels: int = 1           # 输入通道数，灰度线条图为 1。
+    token_dim: int = 256           # token 特征维度，必须同时能被 4 和 num_heads 整除。
+    num_heads: int = 8             # 自注意力与交叉注意力的头数。
+    blocks_per_stage: int = 2      # 单个配准阶段内堆叠的双流注意力块数。
+    num_stages: int = 4            # 串联配准阶段数；每阶段读取前一阶段变形后的 A。
+    mlp_ratio: float = 4.0         # FFN 隐藏层宽度为 int(token_dim * mlp_ratio)。
+    lipschitz_limit: float = 0.8   # 每阶段位移场的 Lipschitz 上界，须在 (0,1) 内以保证不折叠。
+    share_stage_weights: bool = False  # True：各阶段共用参数；False：各阶段参数独立。
+    head_init_std: float = 1e-3    # 位移输出头权重的初始标准差，从小变形开始。
 
     def __post_init__(self) -> None:
         for name in ("image_size", "patch_size", "in_channels", "token_dim",
@@ -40,24 +40,25 @@ class ModelConfig:
 
     @property
     def patch_grid_size(self) -> int:
+        """每个方向上的 patch 数量。"""
         return self.image_size // self.patch_size
 
     @property
     def control_grid_size(self) -> int:
-        # One fixed zero ring around all predicted patch displacements.
+        # 预测的 patch 位移外增加一圈固定零节点，保持图像边界不动。
         return self.patch_grid_size + 2
 
 
 @dataclass(frozen=True, slots=True)
 class LossConfig:
-    # The three top-level loss proportions. Defaults need experimental tuning.
-    mse_weight: float = 1.0
-    distance_weight: float = 1.0
-    deformation_weight: float = 1e-4
-    # Inside deformation = bending + displacement_ratio * displacement.
-    displacement_ratio: float = 0.01
-    distance_threshold: float = 0.0  # Input convention: white=+1, black=-1.
-    epsilon: float = 1e-8
+    # 总损失为以下三项的加权和；默认比例是实验起点，可在此调整。
+    mse_weight: float = 1.0        # 软平衡 MSE 的系数，内部自动平衡前景与背景。
+    distance_weight: float = 1.0   # 距离场匹配损失的系数，距离使用归一化坐标单位。
+    deformation_weight: float = 1e-4  # 形变正则的系数。
+    # 形变正则 = 弯曲损失 + displacement_ratio * 位移平方损失。
+    displacement_ratio: float = 0.01  # 形变正则内部的小位移惩罚比例。
+    distance_threshold: float = 0.0  # 距离场将 <= 此值视为前景；输入白色 +1、黑色 -1。
+    epsilon: float = 1e-8          # 损失归一化分母的下限，避免除零。
 
     def __post_init__(self) -> None:
         for name in ("mse_weight", "distance_weight", "deformation_weight",

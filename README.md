@@ -33,6 +33,6 @@ python -m unittest discover -s tests -v
 
 ## twist 的当前目标
 
-输入两张近似同构的线条图 A、B，通过固定边界、受 Lipschitz 约束的小残差采样变换串联，生成可查询任意 `t ∈ [0,1]` 的轨迹。三类 loss 为软平衡 MSE、原始 A 的距离场匹配与形变正则，不需要真实变形场或中间帧标签。任务不依赖汉字标签；数据生成、完整训练入口和外观分支尚未实现。
+输入两张近似同构的线条图 A、B，通过固定边界、受 Lipschitz 约束的小残差采样变换串联，生成可查询任意 `t ∈ [0,1]` 的轨迹。三类 loss 为软平衡 MSE、原始 A 的距离场匹配与形变正则，不需要真实变形场或中间帧标签。任务不依赖汉字标签；单字实验见 [`twist/train-test-1/`](twist/train-test-1/README.md)，全数据集同字手写图配对训练见 [`twist/train-all-pair/`](twist/train-all-pair/README.md)。通用数据生成和外观分支尚未实现。
 
 完整规划见 [`twist/DESIGN.md`](twist/DESIGN.md)。
