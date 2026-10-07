@@ -18,8 +18,9 @@ sys.path.insert(0, str(ROOT))
 import torch
 
 from twist import LossConfig, ModelConfig, Twist, registration_loss
+from twist.checkpoint import optimizer_state, restore_optimizer, state_only
 from twist.geometry import identity_grid, lipschitz_bound
-from twist.losses import soft_weighted_mse, source_distance_loss
+from twist.losses import gradient_weighted_mse, source_distance_loss
 from twist.images import NORMALIZATION
 from twist.preview import save_preview
 from pairs import PreparedPairs, ShuffledPairSampler
@@ -49,12 +50,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def configured(config_class, args, saved=None, mutable=()):
+def configured(config_class, args, saved=None):
     values = dict(saved) if saved is not None else asdict(config_class())
     for field in fields(config_class):
         supplied = getattr(args, field.name)
         if supplied is not None:
-            if saved is not None and field.name not in mutable and supplied != values[field.name]:
+            if saved is not None and supplied != values[field.name]:
                 raise ValueError(f"--{field.name.replace('_', '-')} differs from checkpoint; start a new run")
             values[field.name] = supplied
     return config_class(**values)
@@ -103,10 +104,8 @@ def train(args):
     if checkpoint and checkpoint.get("normalization") != NORMALIZATION:
         raise ValueError("Checkpoint uses a different normalization; start a new run in a new --output directory")
     model_config = configured(ModelConfig, args, checkpoint["model_config"] if checkpoint else None)
-    loss_config = configured(LossConfig, args, checkpoint["loss_config"] if checkpoint else None)
-    training = configured(TrainingConfig, args, checkpoint["training_config"] if checkpoint else None,
-                          mutable=("steps", "batch_size", "log_every", "validate_every", "save_every", "precision",
-                                   "preload_to_gpu", "distance_cache_size", "animation_frames", "preview_samples"))
+    loss_config = configured(LossConfig, args)
+    training = configured(TrainingConfig, args)
     if model_config.in_channels != 1:
         raise ValueError("prepared handwriting requires in_channels=1")
     supports_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
@@ -138,15 +137,14 @@ def train(args):
         raise ValueError("Prepared manifest differs from checkpoint")
     if checkpoint and data.pairing_fingerprint != checkpoint["pairing_fingerprint"]:
         raise ValueError("Eligible same-character pairs differ from checkpoint; start a new run")
-    validation_pairs = checkpoint["validation_pairs"] if checkpoint else data.fixed_validation(
-        training.val_batches * training.batch_size, training.seed ^ 0x6A09E667)
+    validation_pairs = data.fixed_validation(training.val_batches * training.batch_size, training.seed ^ 0x6A09E667)
     previews = preview_indices(data, validation_pairs, training.preview_samples)
     sampler = ShuffledPairSampler(data, training.seed, checkpoint["sampler"] if checkpoint else None)
     model = Twist(model_config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=training.learning_rate)
     if checkpoint:
         model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        restore_optimizer(optimizer, checkpoint["optimizer"])
         torch.set_rng_state(checkpoint["rng_cpu"])
         rng_cuda = checkpoint.get("rng_cuda", [])
         if device.type == "cuda" and len(rng_cuda) == torch.cuda.device_count():
@@ -169,25 +167,25 @@ def train(args):
                 "actual_precision": precision, "torch_version": str(torch.__version__),
                 "resume_from": str(args.resume.resolve()) if args.resume else None}
     dump_json(output / "run.json", run_info)
-    print(f"Device={device}; precision={precision}; parameters={parameters:,}; batch={training.batch_size}; "
+    print(f"Device={device}; precision={precision}; parameters={parameters:,}; batch={training.batch_size}; lr={training.learning_rate:g}; "
           f"fixed validation pairs={len(validation_pairs):,}; output={output}", flush=True)
-    best_total = checkpoint["best_total"] if checkpoint and (output / "best.pt").exists() else math.inf
+    best_total = math.inf
     step, latest_validation = start_step, None
     started = time.monotonic()
     loss_names = ("total", "mse", "distance", "deformation", "bending", "displacement")
 
     def append_metrics(record):
+        record["loss_config"] = asdict(loss_config)
         with (output / "metrics.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
     def save_checkpoint(name):
         # 不打包全量字图或距离缓存，检查点大小主要由模型/优化器决定。
         atomic_save({"kind": "twist-all-pair", "version": 1, "step": step, "best_total": best_total,
-                     "model_config": asdict(model_config), "loss_config": asdict(loss_config),
-                     "training_config": asdict(training), "data_fingerprint": data.fingerprint,
+                     "model_config": asdict(model_config), "data_fingerprint": data.fingerprint,
                      "normalization": NORMALIZATION, "pairing_fingerprint": data.pairing_fingerprint,
                      "validation_pairs": validation_pairs, "sampler": sampler.state_dict(),
-                     "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                     "model": model.state_dict(), "optimizer": optimizer_state(optimizer),
                      "rng_cpu": torch.get_rng_state(),
                      "rng_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
                      "validation": latest_validation, "baseline": baseline}, output / name)
@@ -200,7 +198,7 @@ def train(args):
             a, b, d = data.batch(chunk, device)
             if identity:
                 grid = identity_grid(len(chunk), a.shape[-2:], device=device)
-                losses = {"mse": soft_weighted_mse(a, b, loss_config.epsilon),
+                losses = {"mse": gradient_weighted_mse(a, b, loss_config.mse_uniform_ratio, loss_config.epsilon),
                           "distance": source_distance_loss(grid, b, d, loss_config.epsilon)}
             else:
                 with precision_context():
@@ -218,9 +216,28 @@ def train(args):
             values["stage_lipschitz_max"] = bounds
         return values
 
-    baseline = checkpoint["baseline"] if checkpoint and "baseline" in checkpoint else evaluate(validation_pairs, identity=True)
+    baseline = evaluate(validation_pairs, identity=True)
     run_info["validation_identity_baseline"] = baseline
     dump_json(output / "run.json", run_info)
+    # 当前 loss/验证设置可能变化，因此旧 best 只恢复模型后重新评分。
+    best_path = output / "best.pt"
+    if checkpoint and best_path.exists():
+        previous_best = torch.load(best_path, map_location="cpu", weights_only=True)
+        if (previous_best["model_config"] == asdict(model_config)
+                and previous_best.get("data_fingerprint") == data.fingerprint
+                and previous_best.get("normalization") == NORMALIZATION):
+            model.load_state_dict(previous_best["model"])
+            model.eval()
+            best_validation = evaluate(validation_pairs)
+            best_validation["evaluated_step"] = previous_best["step"]
+            best_validation["mse_vs_identity"] = best_validation["mse"] / max(baseline["mse"], loss_config.epsilon)
+            best_total = best_validation["total"]
+            previous_best.update(best_total=best_total, validation=best_validation,
+                                 baseline=baseline, validation_pairs=validation_pairs,
+                                 pairing_fingerprint=data.pairing_fingerprint)
+            atomic_save(state_only(previous_best), best_path)
+            model.load_state_dict(checkpoint["model"])
+            print(f"Re-evaluated best checkpoint with current loss: {best_total:.6f}", flush=True)
     @torch.no_grad()
     def report_validation(preview=True, append=True):
         nonlocal best_total, latest_validation
@@ -258,7 +275,7 @@ def train(args):
               f"grad={grad_norm:.3f}", flush=True)
         model.train()
 
-    report_validation(append=not populated)
+    report_validation()
     save_checkpoint("last.pt")
     stop_requested = False
     def request_stop(signum, frame):

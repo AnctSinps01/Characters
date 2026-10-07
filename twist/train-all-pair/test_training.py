@@ -1,5 +1,6 @@
 """Prepared-data integration checks for full-dataset same-character training."""
 from contextlib import redirect_stdout
+from dataclasses import dataclass
 import io
 import json
 from pathlib import Path
@@ -17,10 +18,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1]))
 
-from twist import distance_fields
+from twist import LossConfig, distance_fields
+from twist.checkpoint import restore_optimizer
 from twist.images import NORMALIZATION
 from pairs import PreparedPairs, ShuffledPairSampler
 from train import parse_args, train
+from settings import TrainingConfig
 
 
 def fixture(root):
@@ -79,12 +82,16 @@ class PairTrainingTests(unittest.TestCase):
             sampler = ShuffledPairSampler(data, 91)
             first = sampler.next(4)
             restored = ShuffledPairSampler(data, 91, sampler.state_dict())
+            changed_seed = ShuffledPairSampler(data, 92, sampler.state_dict())
             tail = sampler.next(4)
             self.assertEqual(len(tail), 2)
             torch.testing.assert_close(tail, restored.next(4), rtol=0, atol=0)
+            torch.testing.assert_close(tail, changed_seed.next(4), rtol=0, atol=0)
             self.assertEqual(set(torch.cat((first, tail))[:, 0].tolist()), set(data.records["train"].tolist()))
             torch.testing.assert_close(sampler.next(4), restored.next(4), rtol=0, atol=0)
             self.assertGreater(sampler.epoch_progress, 1)
+            new_epoch = changed_seed.next(len(data.records["train"]))
+            self.assertEqual(set(new_epoch[:, 0].tolist()), set(data.records["train"].tolist()))
 
     def test_faint_images_normalize_independently_and_have_foreground(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -191,7 +198,7 @@ class PairTrainingTests(unittest.TestCase):
             summary = json.loads((root / "split" / "summary.json").read_text())
             self.assertEqual(summary["status"], "stopped_early")
             self.assertEqual(summary["step"], 3)
-            self.run_training(["--data", root / "data", "--device", "cpu", "--resume", root / "split" / "last.pt"])
+            self.run_training([*common, "--resume", root / "split" / "last.pt"])
             whole = torch.load(root / "whole" / "last.pt", weights_only=True)
             resumed = torch.load(root / "split" / "last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 5)
@@ -200,6 +207,9 @@ class PairTrainingTests(unittest.TestCase):
             torch.testing.assert_close(whole["validation_pairs"], resumed["validation_pairs"], rtol=0, atol=0)
             self.assertNotIn("pixels", resumed)
             self.assertNotIn("distance_cache", resumed)
+            self.assertNotIn("training_config", resumed)
+            self.assertNotIn("loss_config", resumed)
+            self.assertEqual(set(resumed["optimizer"]["param_groups"][0]), {"params"})
             self.assertEqual(resumed["normalization"], NORMALIZATION)
             self.assertEqual(json.loads((root / "split" / "excluded_images.json").read_text()), [])
             self.assertEqual(resumed["validation"]["count"], 4)
@@ -227,6 +237,67 @@ class PairTrainingTests(unittest.TestCase):
             np.save(path, pixels)
             with self.assertRaisesRegex(ValueError, "pairs differ"):
                 self.run_training(["--data", root / "data", "--device", "cpu", "--resume", root / "run" / "last.pt"])
+
+    def test_resume_uses_live_config_and_preserves_state_without_saving_parameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root / "data")
+            self.run_training([*self.common(root), "--output", root / "run", "--stop-after", 1])
+            checkpoint_path = root / "run" / "last.pt"
+            before = torch.load(checkpoint_path, weights_only=True)
+            # 旧格式带有训练配置和优化器 lr；这些不能覆盖当前配置。
+            legacy = {**before, "training_config": {"steps": 99999, "batch_size": 99},
+                      "loss_config": {"mse_weight": 0}}
+            legacy["optimizer"] = {"state": before["optimizer"]["state"],
+                                   "param_groups": [{**group, "lr": 9.0}
+                                                    for group in before["optimizer"]["param_groups"]]}
+            torch.save(legacy, checkpoint_path)
+            resume = ["--data", root / "data", "--device", "cpu", "--resume", checkpoint_path]
+            @dataclass(frozen=True)
+            class CurrentTraining(TrainingConfig):
+                steps: int = 1
+                batch_size: int = 2
+                learning_rate: float = 2e-4
+                val_batches: int = 1
+                animation_frames: int = 3
+            @dataclass(frozen=True)
+            class CurrentLoss(LossConfig):
+                mse_weight: float = 10
+                distance_weight: float = 20
+                deformation_weight: float = 0.001
+                displacement_ratio: float = 0.02
+                mse_uniform_ratio: float = 0.2
+            # 在同一步重新评估，以验证仅改 loss 时模型、优化器与配对状态保持原值。
+            with patch("train.TrainingConfig", CurrentTraining), patch("train.LossConfig", CurrentLoss), \
+                    patch("train.restore_optimizer", wraps=restore_optimizer) as restored:
+                self.run_training(resume)
+                self.assertEqual(restored.call_args.args[0].param_groups[0]["lr"], 2e-4)
+            after = torch.load(checkpoint_path, weights_only=True)
+            best = torch.load(root / "run" / "best.pt", weights_only=True)
+            for key in ("model", "optimizer", "sampler"):
+                torch.testing.assert_close(before[key], after[key], rtol=0, atol=0)
+            self.assertNotIn("loss_config", after)
+            self.assertNotIn("training_config", after)
+            self.assertNotIn("loss_config", best)
+            self.assertEqual(set(after["optimizer"]["param_groups"][0]), {"params"})
+            self.assertEqual(after["model_config"], before["model_config"])
+            run = json.loads((root / "run" / "run.json").read_text())
+            self.assertEqual(run["training"]["batch_size"], 2)
+            self.assertEqual(run["loss"]["mse_uniform_ratio"], 0.2)
+            self.assertEqual(after["validation"]["count"], 2)
+            validation = after["validation"]
+            expected = 10 * validation["mse"] + 20 * validation["distance"] + 0.001 * validation["deformation"]
+            self.assertAlmostEqual(validation["total"], expected, places=5)
+            self.assertAlmostEqual(best["best_total"], best["validation"]["total"], places=7)
+            self.assertLessEqual(best["best_total"], validation["total"] + 1e-7)
+            self.assertGreater(best["best_total"], before["best_total"])
+            with patch("train.TrainingConfig", CurrentTraining), patch("train.LossConfig", CurrentLoss):
+                self.run_training([*resume, "--steps", 2])
+            continued = torch.load(checkpoint_path, weights_only=True)
+            self.assertEqual(continued["step"], 2)
+            self.assertTrue(all(float(state["step"]) == 2 for state in continued["optimizer"]["state"].values()))
+            records = [json.loads(line) for line in (root / "run" / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual(records[-1]["loss_config"], run["loss"])
 
     def test_interrupt_finishes_one_update_and_saves_sampler_and_optimizer(self):
         with tempfile.TemporaryDirectory() as directory:

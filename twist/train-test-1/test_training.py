@@ -1,6 +1,6 @@
 """Small prepared-data fixtures exercise loading, training, previews and resume."""
 from contextlib import redirect_stdout
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import io
 import json
 from pathlib import Path
@@ -19,9 +19,10 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1]))
 
 from twist import LossConfig, ModelConfig, RegistrationResult
+from twist.checkpoint import restore_optimizer
 from twist.geometry import identity_grid, lipschitz_bound, sample_image
 from twist.preview import save_preview
-from glyph_pair import load_glyphs
+from glyph_pair import configure_glyphs, load_glyphs
 from settings import TrainingConfig
 from train import parse_args, train
 
@@ -140,10 +141,14 @@ class TrainingTests(unittest.TestCase):
             self.run_training([*common, "--output", root / "whole", "--steps", 5])
             self.run_training([*common, "--output", root / "split", "--steps", 3])
             (root / "prepared").rename(root / "moved_prepared")
-            self.run_training(["--resume", root / "split" / "last.pt", "--steps", 5, "--device", "cpu"])
+            self.run_training([*common, "--resume", root / "split" / "last.pt", "--steps", 5])
             whole = torch.load(root / "whole" / "last.pt", weights_only=True)
             resumed = torch.load(root / "split" / "last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 5)
+            self.assertNotIn("training_config", resumed)
+            self.assertNotIn("loss_config", resumed)
+            self.assertNotIn("loss_config", resumed["metrics"])
+            self.assertEqual(set(resumed["optimizer"]["param_groups"][0]), {"params"})
             for name, value in whole["model"].items():
                 torch.testing.assert_close(value, resumed["model"][name], rtol=0, atol=0)
             summary = json.loads((root / "split" / "summary.json").read_text())
@@ -180,6 +185,66 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(saved["step"], 1)
             self.assertTrue(all(float(state["step"]) == 1 for state in saved["optimizer"]["state"].values()))
             self.assertEqual(signal.getsignal(signal.SIGINT), original_handler)
+
+    def test_live_loss_and_learning_rate_keep_cached_data_and_rescore_best(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared_fixture(root / "prepared")
+            self.run_training(["--data", root / "prepared", "--output", root / "run",
+                "--device", "cpu", "--steps", 1, "--image-size", 16, "--patch-size", 4,
+                "--token-dim", 16, "--num-heads", 4, "--blocks-per-stage", 1,
+                "--num-stages", 1, "--batch-size", 2, "--animation-frames", 3])
+            path = root / "run" / "last.pt"
+            before = torch.load(path, weights_only=True)
+            (root / "prepared").rename(root / "moved_prepared")
+            @dataclass(frozen=True)
+            class CurrentTraining(TrainingConfig):
+                steps: int = 1
+                batch_size: int = 2
+                learning_rate: float = 2e-4
+                animation_frames: int = 3
+            @dataclass(frozen=True)
+            class CurrentLoss(LossConfig):
+                mse_weight: float = 10
+                distance_weight: float = 20
+                deformation_weight: float = 0.001
+            with patch("train.TrainingConfig", CurrentTraining), patch("train.LossConfig", CurrentLoss), \
+                    patch("train.restore_optimizer", wraps=restore_optimizer) as restored:
+                self.run_training(["--resume", path, "--device", "cpu"])
+                self.assertEqual(restored.call_args.args[0].param_groups[0]["lr"], 2e-4)
+            after = torch.load(path, weights_only=True)
+            best = torch.load(root / "run" / "best.pt", weights_only=True)
+            for key in ("model", "optimizer"):
+                torch.testing.assert_close(before[key], after[key], rtol=0, atol=0)
+            for key, value in before["glyphs"].items():
+                if isinstance(value, torch.Tensor):
+                    torch.testing.assert_close(value, after["glyphs"][key], rtol=0, atol=0)
+                else:
+                    self.assertEqual(value, after["glyphs"][key])
+            self.assertNotIn("loss_config", after)
+            self.assertNotIn("training_config", after)
+            self.assertNotIn("loss_config", after["metrics"])
+            validation = after["metrics"]["val"]
+            expected = 10 * validation["mse"] + 20 * validation["distance"] + 0.001 * validation["deformation"]
+            self.assertAlmostEqual(validation["total"], expected, places=5)
+            self.assertAlmostEqual(best["best_total"], best["metrics"]["val"]["total"], places=7)
+            self.assertLessEqual(best["best_total"], validation["total"] + 1e-7)
+            self.assertGreater(best["best_total"], before["best_total"])
+
+    def test_cached_pixels_follow_current_mode_writer_and_synthetic_parameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "prepared"
+            prepared_fixture(root)
+            with redirect_stdout(io.StringIO()):
+                cached = load_glyphs(root, tiny_model(), LossConfig(), TrainingConfig(), "writer2")
+            restored = configure_glyphs(cached, tiny_model(), LossConfig(), TrainingConfig())
+            self.assertEqual(restored["train_indices"].tolist(), [0, 1, 2])
+            self.assertEqual(restored["val_indices"].tolist(), [3, 4])
+            synthetic = replace(TrainingConfig(), mode="synthetic", synthetic_displacement=0.02)
+            small = configure_glyphs(cached, tiny_model(), LossConfig(), synthetic)
+            large = configure_glyphs(cached, tiny_model(), LossConfig(), replace(synthetic, synthetic_displacement=0.06))
+            self.assertFalse(len(small["val_indices"]))
+            self.assertGreater(float((small["targets"] - large["targets"]).abs().max()), 0.01)
 
     def test_gif_frame_count_follows_setting_even_when_the_image_does_not_move(self):
         with tempfile.TemporaryDirectory() as directory:

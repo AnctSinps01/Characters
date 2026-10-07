@@ -37,7 +37,7 @@ python twist/train-all-pair/train.py --device cuda --steps 10000 --output runs/t
 - 全部原始字图以 uint8 缓存；`preload_to_gpu=True` 可让它们常驻训练显卡，需显存足够。
 - writer 加载日志分别打印累计 `read`（读文件）、`copy`（复制像素）、`metadata`（标签与书写者索引）时间；全部加载后单独打印同字配对索引耗时。这些时间也保存到 `run.json` 的 `data_loading_seconds`。CPU 像素复制采用 NumPy 直接写入 Tensor 的共享存储。
 - 源图 A 的距离场按需准备，用 CPU LRU 缓存复用；默认最多 8,192 张，64×64 时约 128 MiB，满时淘汰旧项。距离场会依据实际输入尺寸计算。
-- 默认固定选最多 512 对验证样本，在验证书写者之间配对，后续保持不变。`val_batches=0` 在首次训练时启用全部可配对验证源图，每个源图对应一个固定 B。
+- 默认选最多 512 对固定验证样本，在验证书写者之间配对。每次启动按当前 `seed`、`val_batches` 与 batch 生成；设置相同则配对相同。`val_batches=0` 启用全部可配对验证源图，每个源图对应一个固定 B。
 - 默认每 1,000 步验证并保存；第 0 步、短运行结束、训练结束也验证和保存。普通日志每 50 步记录更新后的训练批次。
 - 默认预览 4 对验证图，尽量选择不同字符；只保存轨迹 GIF。帧数由 `animation_frames` 控制，包含 t=0、1。
 
@@ -65,7 +65,19 @@ python twist/train-all-pair/show_inputs.py --run runs/twist-all-minmax --output 
 
 旧版固定按 0–255 缩放的全数据检查点不能接着此版续训，因为输入、损失基线与可配对样本可能变化。同步更新后使用新的输出目录从零开始，无需重做预处理数据。
 
-续训使用保存的结构、loss 和训练配置，可覆盖累计步数、batch、运行间隔、精度、预加载位置、距离缓存容量、预览数与 GIF 帧数。固定验证对保持不变；例如改帧数加 `--animation-frames 61`。新训练使用新输出目录；从较早检查点恢复也应指定新目录。
+每次启动或续训都从当前 `settings.py` 读取训练设置，从当前 `config.py` 读取 loss 设置；命令行优先。只有模型结构配置从检查点恢复。检查点不保存训练/loss 配置，Adam 也只保存动量与参数索引，学习率等优化器选项使用本次设置。旧检查点中的训练/loss 配置与优化器选项会被忽略。
+
+修改文件后用同一条 `--resume` 命令即可生效；临时用命令行指定的参数，下次启动仍需指定或写进配置文件。进度、当前轮剩余源图顺序和随机状态会恢复；`seed` 用于新启动的随机初始化及后续轮次打乱，不覆盖已保存的当前轮顺序。旧版没有保存当前轮顺序的检查点，首次迁移时请保留原 `seed`。
+
+每次续训重算当前模型、已有 `best.pt` 和原图基线的 loss，按当前验证集和 loss 比较 best。当前参数写入 `run.json`，每条指标记录包含当时的 `loss_config`；不同 loss 定义或权重下的总 loss 不能直接比较。新训练使用新输出目录；从较早检查点恢复也应指定新目录。
+
+```bash
+python twist/train-all-pair/train.py --device cuda --resume runs/twist-all-minmax/last.pt --mse-weight 1 --distance-weight 1 --deformation-weight 0.001
+```
+
+这将形变正则权重从默认 `0.0001` 提高为 `0.001`。`--displacement-ratio` 调整 `def` 内部的位移惩罚占比。需要保留原实验的 best 和日志时，另加 `--output runs/twist-all-reweighted`，使用新的空目录。
+
+MSE 使用 B 的 Sobel 灰度梯度平方加权，逐图归一化，并保留普通全图误差。设 `e=(A′−B)²`、`g=|∇B|²`，单图 MSE 为 `α * mean(e) + (1−α) * sum(g*e)/sum(g)`。默认 `mse_uniform_ratio=α=0.1`，即 90% 边缘加权、10% 全图；无边缘时用普通 MSE。边缘权重不对预测图计算，不能靠降低预测对比度来降低权重。灰度前景权重仍用于距离场 loss。
 
 日志中的 `step` 是累计优化器更新次数，`epoch` 是可配对训练源图的遍历进度；每轮每张图作为 A 一次。`train` 是更新后重新评估当前 batch 的总 loss，`mse`、`distance`、`def` 是乘系数前的三项。默认 `train = mse + distance + 1e-4 * def`；`def` 是弯曲能量加 `0.01 * 位移平方均值`。`grad` 是本次反向传播中裁剪前的全模型梯度 L2 范数，默认裁剪上限为 1。
 

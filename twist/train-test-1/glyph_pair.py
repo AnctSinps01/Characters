@@ -110,8 +110,29 @@ def load_glyphs(root: Path, model: ModelConfig, loss: LossConfig, training: Trai
     handwriting = torch.cat(handwriting)
     all_writer_ids = [w["id"] for w in writers]
     metadata.update(loaded_writers=all_writer_ids,
+                    writer_splits={w["id"]: w["split"] for w in writers},
                     handwriting_count=len(writers), excluded_images=excluded,
                     loaded_pixel_mib=(handwriting.numel() + source.numel()) * 4 / 1024**2)
+    return configure_glyphs({"source": source, "handwriting": handwriting, "metadata": metadata},
+                            model, loss, training, writer_id)
+
+
+def configure_glyphs(cached: dict, model: ModelConfig, loss: LossConfig,
+                     training: TrainingConfig, writer_id: str | None = None) -> dict:
+    """Reuse pixels, but rebuild targets, splits and distance from live config."""
+    source, handwriting = cached["source"], cached["handwriting"]
+    metadata = dict(cached["metadata"])
+    if metadata["character"] != training.character:
+        raise ValueError("cached character differs; load the requested character from prepared data")
+    metadata["mode"] = training.mode
+    metadata.pop("overfit_writer", None)
+    all_writer_ids = metadata["loaded_writers"]
+    splits = metadata.get("writer_splits")
+    if splits is None:
+        # 旧完整手写缓存可以从数据划分清单恢复；没有恢复旧训练配置。
+        splits = {writer: split for split in ("train", "val")
+                  for writer in metadata.get(f"{split}_ids", []) if writer in all_writer_ids}
+    metadata["writer_splits"] = splits
     true_grid = true_field = None
     if training.mode == "synthetic":
         if writer_id is not None:
@@ -122,14 +143,16 @@ def load_glyphs(root: Path, model: ModelConfig, loss: LossConfig, training: Trai
         targets, target_ids = handwriting, all_writer_ids
         if writer_id is not None:
             if writer_id not in all_writer_ids:
-                if any(w["writer"] == writer_id for w in excluded):
+                if any(w["writer"] == writer_id for w in metadata.get("excluded_images", [])):
                     raise ValueError(f"Writer {writer_id!r} has a constant image for {training.character!r}")
                 raise ValueError(f"Writer {writer_id!r} does not contain {training.character!r}")
             train_indices, val_indices = [all_writer_ids.index(writer_id)], []
             metadata["overfit_writer"] = writer_id
         else:
-            train_indices = [i for i, w in enumerate(writers) if w["split"] == "train"]
-            val_indices = [i for i, w in enumerate(writers) if w["split"] == "val"]
+            if set(splits) != set(all_writer_ids):
+                raise ValueError("cached writer splits are incomplete; reload prepared data with --data")
+            train_indices = [i for i, writer in enumerate(all_writer_ids) if splits[writer] == "train"]
+            val_indices = [i for i, writer in enumerate(all_writer_ids) if splits[writer] == "val"]
     if not train_indices:
         raise ValueError(f"No train writers contain {training.character!r}")
     # 一次准备，训练与续训都使用缓存；每张 B 必须也有墨迹。

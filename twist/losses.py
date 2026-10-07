@@ -1,10 +1,11 @@
-"""Three losses: soft-balanced image MSE, source distance, and deformation."""
+"""Three losses: gradient-weighted image MSE, source distance, and deformation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from .config import LossConfig
@@ -17,23 +18,32 @@ def foreground_weights(images: Tensor) -> Tensor:
     return ((1 - images.float().mean(dim=1, keepdim=True)) / 2).clamp(0, 1)
 
 
-def soft_weighted_mse(prediction: Tensor, target: Tensor, epsilon: float = 1e-8) -> Tensor:
-    """Balance foreground and background means separately within each image.
+def gradient_weighted_mse(prediction: Tensor, target: Tensor,
+                          uniform_ratio: float = 0.1, epsilon: float = 1e-8) -> Tensor:
+    """Emphasize B's edges while retaining a uniform image-error component.
 
-    Both use the target's soft occupancy rather than a hard sign threshold.
-    Nonempty foreground/background groups receive equal automatic weight.
-    Empty groups are excluded instead of halving an all-white/all-black loss.
+    Sobel gradients use replicate padding so the canvas boundary does not
+    create an artificial edge. Normalize gradient energy independently for
+    each image; constant targets fall back to ordinary MSE. Weights are
+    detached target statistics, rather than gradients of the predicted image.
     """
     if prediction.shape != target.shape or prediction.ndim != 4:
         raise ValueError("prediction and target must have equal shape [B,C,H,W]")
+    if not 0 <= uniform_ratio <= 1 or epsilon <= 0:
+        raise ValueError("uniform_ratio must be in [0,1] and epsilon must be positive")
     squared = (prediction.float() - target.float()).square().mean(dim=1, keepdim=True)
-    foreground = foreground_weights(target)
-    weights = torch.stack((foreground, 1 - foreground), dim=1)
-    mass = weights.sum(dim=(2, 3, 4))
-    error = (weights * squared[:, None]).sum(dim=(2, 3, 4))
-    present = (mass > epsilon).to(dtype=error.dtype)
-    group_means = error / mass.clamp_min(epsilon)
-    return ((group_means * present).sum(dim=1) / present.sum(dim=1).clamp_min(1)).mean()
+    # 在混合精度上下文内也用 FP32 计算弱边缘的权重。
+    with torch.autocast(device_type=target.device.type, enabled=False):
+        gray = target.detach().float().mean(dim=1, keepdim=True)
+        kernels = gray.new_tensor([[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                   [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]])[:, None] / 8
+        gradients = F.conv2d(F.pad(gray, (1, 1, 1, 1), mode="replicate"), kernels)
+        weights = gradients.square().sum(dim=1, keepdim=True)
+    mass = weights.sum(dim=(1, 2, 3))
+    plain = squared.mean(dim=(1, 2, 3))
+    edge = (weights * squared).sum(dim=(1, 2, 3)) / mass.clamp_min(epsilon)
+    edge = torch.where(mass > epsilon, edge, plain)
+    return (uniform_ratio * plain + (1 - uniform_ratio) * edge).mean()
 
 
 def source_distance_loss(grid: Tensor, target: Tensor, source_distance: Tensor,
@@ -90,7 +100,7 @@ def registration_loss(result: RegistrationResult, target: Tensor,
                       source_distance: Tensor, config: LossConfig | None = None) -> LossBreakdown:
     """Train the fitted endpoint, not an independently predicted intermediate frame."""
     config = config or LossConfig()
-    mse = soft_weighted_mse(result.image, target, config.epsilon)
+    mse = gradient_weighted_mse(result.image, target, config.mse_uniform_ratio, config.epsilon)
     distance = source_distance_loss(result.grid, target, source_distance, config.epsilon)
     bending, movement = deformation_components(result.displacements)
     deformation = bending + config.displacement_ratio * movement

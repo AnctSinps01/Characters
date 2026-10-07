@@ -4,7 +4,7 @@
 
 数据沿用 [DiT-flow/TRAINING.md](../../DiT-flow/TRAINING.md) 的预处理结果：仓库根目录 `data/prepared/{manifest.json,standards.npy,writers/}`。无需重新处理 GNT。已有图像尺寸不同会先缩放到模型尺寸。
 
-新训练在缩放后，对每张 A、B 分别使用 `2 * (pixel - min) / (max - min) - 1`，阈值 0 判断前景。恒定的手写图跳过并记录在 `run.json` 的 `glyphs.excluded_images`；恒定标准图无法作为 A，会报错。旧版单字检查点续训保留其中已缓存的输入与距离场，若要使用逐图 min–max 归一化，请用新目录从零训练。
+新训练在缩放后，对每张 A、B 分别使用 `2 * (pixel - min) / (max - min) - 1`，阈值 0 判断前景。恒定的手写图跳过并记录在 `run.json` 的 `glyphs.excluded_images`；恒定标准图无法作为 A，会报错。旧版单字检查点续训保留其中已缓存的输入，若要使用逐图 min–max 归一化，请用新目录从零训练。距离场在启动时按当前阈值重新准备。
 
 ## 云主机运行
 
@@ -43,7 +43,7 @@ python twist/train-test-1/train.py --char 中 --writer 书写者ID --steps 200 -
 
 - [settings.py](settings.py)：步数、batch size、学习率、日志/预览间隔、精度、合成形变强度。
 - [../config.py](../config.py)：模型结构与三类 loss 比例。默认完整模型约 14.82M 参数；所有配置也可用同名命令行参数覆盖，例如 `--token-dim 128 --num-heads 4 --batch-size 8`。
-- 默认 FP32。支持 BF16 的 CUDA GPU 可用 `--precision bf16`；续训恢复模型/loss/训练配置与抽样状态，允许调整目标步数、batch、日志/预览间隔和精度。
+- 默认 FP32。支持 BF16 的 CUDA GPU 可用 `--precision bf16`；续训恢复模型结构、权重、优化器动量与抽样状态，训练/loss 参数直接使用当前文件与命令行。
 
 | 输出 | 内容 |
 |---|---|
@@ -56,7 +56,11 @@ python twist/train-test-1/train.py --char 中 --writer 书写者ID --steps 200 -
 
 第 0 步、每隔 100 步和结束时评估完整集合、保存检查点和预览；普通日志每 10 步记录更新后的抽样批次。预览固定展示 train/val 各自第一个样本，具体 ID 见 `run.json`。`Ctrl+C` 等当前更新结束后保存。新实验拒绝覆盖非空目录；从较早检查点恢复请指定新的输出目录。
 
-GIF 帧数也可运行时用 `--animation-frames 61` 覆盖。续训恢复检查点中的配置，要改变旧实验的帧数也使用这个参数。
+每次启动或续训读取当前 `settings.py` 与 `config.py` 的训练/loss 设置，命令行优先。修改文件后直接用 `--resume` 生效；学习率也使用本次值，不会被旧优化器覆盖。检查点只保存模型结构配置与权重、动量、进度等状态；旧训练/loss 配置被忽略。当前设置记录在 `run.json` 与日志中。
+
+字符、模式和 `--writer` 也使用本次值；同字复用缓存并重新选择 train/val，synthetic 目标按当前合成参数重新生成，换字需要读取 prepared 数据。旧版 synthetic/overfit 缓存可能缺少完整 writer 划分，切回全量 handwriting 时需要原数据。续训重算原图基线、当前模型及已有最佳模型的 loss，按当前设置比较 `best.pt`。需要保留原实验输出时，使用新的空 `--output` 目录。
+
+MSE 默认由 90% 的 B 灰度梯度平方加权误差和 10% 全图误差组成，边缘权重按图归一化。`config.py` 的 `mse_uniform_ratio` 调整全图占比；`mse_weight`、`distance_weight`、`deformation_weight` 调整三项比例。不同 loss 定义与权重下的数值不能直接比较。GIF 帧数修改 `animation_frames` 或使用 `--animation-frames 61`。
 
 图片预览只保存 GIF，不保存输入、端点叠加、逐阶段或网格 PNG。
 

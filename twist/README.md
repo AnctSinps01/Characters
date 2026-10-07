@@ -14,7 +14,8 @@ CA 用 B 做 Q、当前 A 做 K/V，修改 B 的查询 token 并解码二维位�
 | [model.py](model.py) | 串联阶段与缓存轨迹 |
 | [geometry.py](geometry.py) | 边界、Lipschitz 限制、连续场求值与反向采样 |
 | [distance.py](distance.py) | 原始图的距离场准备；计算一次后缓存 |
-| [losses.py](losses.py) | 软平衡 MSE、距离场和形变正则 |
+| [losses.py](losses.py) | 梯度平方加权 MSE、距离场和形变正则 |
+| [checkpoint.py](checkpoint.py) | 只保存状态，按当前超参数恢复优化器 |
 | [preview.py](preview.py) | 训练入口共用的轨迹 GIF 预览 |
 | [count_parameters.py](count_parameters.py) | 参数统计 |
 | tests/ | 几何约束、数据流、loss 梯度与混合精度验证 |
@@ -54,7 +55,9 @@ middle = result.render(0.5).image  # 复用已经预测的位移，不再运行�
 
 单阶段可以独立使用：RegistrationStage(model_config)(current_A, B) 返回受限控制网格 [batch, 2, patch_grid_size+2, patch_grid_size+2]。外圈固定为零，内部每个 token 对应一个二维控制点。轨迹查询支持标量 t 或 [batch] 时间张量。
 
-MSE 根据 B 的软墨迹权重自动平衡前景/背景；三项比例为 mse_weight、distance_weight、deformation_weight。形变项内部的位移占比由 displacement_ratio 调整。默认比例是实验起点，尚未完成真实数据训练。
+MSE 默认由 90% 的 B 梯度平方加权误差与 10% 普通全图误差组成；Sobel 计算灰度梯度，每张图的权重单独归一化，无边缘时退化为普通 MSE。全图占比由 `mse_uniform_ratio` 调整。三项比例为 `mse_weight`、`distance_weight`、`deformation_weight`；形变项内部的位移占比由 `displacement_ratio` 调整。
+
+训练和 loss 配置在每次启动时从当前文件读取，命令行覆盖；检查点只保存模型结构配置与模型、优化器动量、进度等状态。续训也直接使用当前配置。梯度加权仍依赖 A 采样位置的图像梯度，距离场 loss 用于补足纯白区域的坐标梯度。
 
 ## 默认规模
 

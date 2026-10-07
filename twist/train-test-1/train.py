@@ -18,10 +18,11 @@ sys.path.insert(0, str(ROOT))
 import torch
 
 from twist import LossConfig, ModelConfig, Twist, registration_loss
+from twist.checkpoint import optimizer_state, restore_optimizer, state_only
 from twist.geometry import identity_grid, lipschitz_bound
-from twist.losses import soft_weighted_mse, source_distance_loss
+from twist.losses import gradient_weighted_mse, source_distance_loss
 from twist.preview import save_preview
-from glyph_pair import load_glyphs
+from glyph_pair import configure_glyphs, load_glyphs
 from settings import TrainingConfig
 
 
@@ -49,12 +50,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def configured(config_class, args, saved=None, mutable=()):
+def configured(config_class, args, saved=None):
     values = dict(saved) if saved is not None else asdict(config_class())
     for field in fields(config_class):
         supplied = getattr(args, field.name)
         if supplied is not None:
-            if saved is not None and field.name not in mutable and supplied != values[field.name]:
+            if saved is not None and supplied != values[field.name]:
                 raise ValueError(f"--{field.name.replace('_', '-')} differs from checkpoint; start a new run")
             values[field.name] = supplied
     return config_class(**values)
@@ -88,9 +89,8 @@ def train(args):
         if checkpoint.get("version") != 1:
             raise ValueError("unsupported single-glyph checkpoint version")
     model_config = configured(ModelConfig, args, checkpoint["model_config"] if checkpoint else None)
-    loss_config = configured(LossConfig, args, checkpoint["loss_config"] if checkpoint else None)
-    training = configured(TrainingConfig, args, checkpoint["training_config"] if checkpoint else None,
-                          mutable=("steps", "batch_size", "log_every", "preview_every", "precision", "animation_frames"))
+    loss_config = configured(LossConfig, args)
+    training = configured(TrainingConfig, args)
     if training.precision == "bf16" and (device.type != "cuda" or not torch.cuda.is_bf16_supported()):
         raise ValueError("bf16 requires a CUDA device with BF16 support; use --precision fp32")
     torch.manual_seed(training.seed)
@@ -109,9 +109,18 @@ def train(args):
             recorded_steps = [json.loads(line)["step"] for line in metrics_path.read_text(encoding="utf-8").splitlines() if line]
             if recorded_steps and max(recorded_steps) > start_step:
                 raise ValueError("Metrics contain later steps than this checkpoint; resume into a new --output.")
-    glyphs = checkpoint["glyphs"] if checkpoint else load_glyphs(args.data, model_config, loss_config, training, args.writer)
-    if checkpoint and args.writer is not None and args.writer != glyphs["metadata"].get("overfit_writer"):
-        raise ValueError("--writer differs from the checkpoint")
+    cached = checkpoint["glyphs"] if checkpoint else None
+    if cached and cached["metadata"]["character"] == training.character:
+        # 新缓存有完整 writer 划分；旧 synthetic/overfit 缓存缺失时从数据重载。
+        metadata = cached["metadata"]
+        known_splits = set(metadata.get("train_ids", [])) | set(metadata.get("val_ids", []))
+        incomplete = "writer_splits" not in metadata and not set(metadata["loaded_writers"]).issubset(known_splits)
+        if incomplete and training.mode == "handwriting" and args.writer is None:
+            glyphs = load_glyphs(args.data, model_config, loss_config, training, args.writer)
+        else:
+            glyphs = configure_glyphs(cached, model_config, loss_config, training, args.writer)
+    else:
+        glyphs = load_glyphs(args.data, model_config, loss_config, training, args.writer)
     output.mkdir(parents=True, exist_ok=True)
     atomic_save(glyphs, output / "glyphs.pt")
     source, targets, distance = (glyphs[name].to(device) for name in ("source", "targets", "distance"))
@@ -122,7 +131,7 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=training.learning_rate)
     if checkpoint:
         model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        restore_optimizer(optimizer, checkpoint["optimizer"])
         torch.set_rng_state(checkpoint["rng_cpu"])
         # 抽样使用 CPU RNG；同数量 CUDA 设备时也恢复设备 RNG。
         rng_cuda = checkpoint.get("rng_cuda", [])
@@ -143,7 +152,7 @@ def train(args):
         for chunk in indices.split(training.batch_size):
             a, b, d = batch(chunk)
             grid = identity_grid(len(chunk), source.shape[-2:], device=device)
-            values["mse"] += float(soft_weighted_mse(a, b, loss_config.epsilon)) * len(chunk)
+            values["mse"] += float(gradient_weighted_mse(a, b, loss_config.mse_uniform_ratio, loss_config.epsilon)) * len(chunk)
             values["distance"] += float(source_distance_loss(grid, b, d, loss_config.epsilon)) * len(chunk)
         return {key: value / len(indices) for key, value in values.items()}
 
@@ -155,21 +164,21 @@ def train(args):
     print(f"Character: {training.character}; mode: {training.mode}; loaded handwriting: "
           f"{glyphs['metadata']['handwriting_count']}; train={len(train_indices)} val={len(val_indices)}; "
           f"pixels={glyphs['metadata']['loaded_pixel_mib']:.2f} MiB", flush=True)
-    print(f"Device: {device}; precision: {training.precision}; parameters: {parameters:,}; batch={batch_size}", flush=True)
+    print(f"Device: {device}; precision: {training.precision}; parameters: {parameters:,}; "
+          f"batch={batch_size}; lr={training.learning_rate:g}", flush=True)
     print(f"Identity baseline: {baseline}; output: {output}", flush=True)
-    best_total = checkpoint["best_total"] if checkpoint and (output / "best.pt").exists() else math.inf
+    best_total = math.inf
     step = start_step
     started = time.monotonic()
     latest = {}
 
     def save_checkpoint(name):
         atomic_save({"version": 1, "step": step, "best_total": best_total,
-                     "model_config": asdict(model_config), "loss_config": asdict(loss_config),
-                     "training_config": asdict(training), "glyphs": glyphs,
-                     "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                     "model_config": asdict(model_config), "glyphs": glyphs,
+                     "model": model.state_dict(), "optimizer": optimizer_state(optimizer),
                      "rng_cpu": torch.get_rng_state(),
                      "rng_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
-                     "metrics": latest}, output / name)
+                     "metrics": {key: value for key, value in latest.items() if key != "loss_config"}}, output / name)
 
     @torch.no_grad()
     def evaluate(indices, split, preview=False):
@@ -214,7 +223,8 @@ def train(args):
         train_metrics = evaluate(train_indices if preview else indices, "train", preview)
         val_metrics = evaluate(val_indices, "val", preview) if preview else None
         latest = {"step": step, "elapsed_seconds": time.monotonic() - started,
-                  "scope": "full" if preview else "batch", "train": train_metrics, "val": val_metrics}
+                  "scope": "full" if preview else "batch", "train": train_metrics, "val": val_metrics,
+                  "loss_config": asdict(loss_config)}
         if grad_norm is not None:
             latest["grad_norm_before_clip"] = grad_norm
         if append:
@@ -233,7 +243,20 @@ def train(args):
             save_checkpoint("last.pt")
         model.train()
 
-    report(preview=True, append=not populated)
+    best_path = output / "best.pt"
+    if checkpoint and best_path.exists():
+        previous_best = torch.load(best_path, map_location="cpu", weights_only=True)
+        if previous_best["model_config"] == asdict(model_config):
+            model.load_state_dict(previous_best["model"])
+            model.eval()
+            best_metrics = {"step": previous_best["step"], "scope": "full",
+                            "train": evaluate(train_indices, "train"), "val": evaluate(val_indices, "val")}
+            best_total = (best_metrics["val"] or best_metrics["train"])["total"]
+            previous_best.update(best_total=best_total, metrics=best_metrics, glyphs=glyphs)
+            atomic_save(state_only(previous_best), best_path)
+            model.load_state_dict(checkpoint["model"])
+            print(f"Re-evaluated best checkpoint with current loss: {best_total:.6f}", flush=True)
+    report(preview=True)
     # SIGINT 只设置停止标记，等当前更新完成再保存，避免保存到一半的优化器状态。
     stop_requested = False
     def request_stop(signum, frame):

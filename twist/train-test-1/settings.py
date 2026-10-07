@@ -12,12 +12,12 @@ class TrainingConfig:
     learning_rate: float = 3e-4
     gradient_clip: float = 1.0
     log_every: int = 10
-    preview_every: int = 100       # 同时保存检查点、端点图、阶段图和 t 轨迹。
+    preview_every: int = 100       # 同时保存检查点和轨迹 GIF。
     seed: int = 42
     precision: str = "fp32"       # 首次验证用 fp32；CUDA 支持时可以改 bf16。
     synthetic_displacement: float = 0.06  # 合成位移模长上限，归一化坐标单位。
     synthetic_lipschitz: float = 0.5
-    animation_frames: int = 21    # 保存 GIF 的总帧数，包含 t=0 和 t=1；PNG 横图固定 5 个时刻。
+    animation_frames: int = 21    # 保存 GIF 的总帧数，包含 t=0 和 t=1。
 
     def __post_init__(self):
         if len(self.character) != 1:

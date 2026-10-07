@@ -226,7 +226,12 @@ class ShuffledPairSampler:
         self.generator = torch.Generator().manual_seed(seed ^ 0x45D9F3B)
         if state:
             self.generator.set_state(state["partner_rng"])
-        self._shuffle()
+        if state and "order" in state:
+            self.order = state["order"].clone()
+            if len(self.order) != len(data.records["train"]):
+                raise ValueError("resumed source order differs from eligible training data")
+        else:
+            self._shuffle()
         if not 0 <= self.offset <= len(self.order):
             raise ValueError("invalid resumed sampler offset")
 
@@ -245,7 +250,8 @@ class ShuffledPairSampler:
         return self.data.match(sources, self.generator)
 
     def state_dict(self):
-        return {"epoch": self.epoch, "offset": self.offset, "partner_rng": self.generator.get_state()}
+        return {"epoch": self.epoch, "offset": self.offset, "order": self.order,
+                "partner_rng": self.generator.get_state()}
 
     @property
     def epoch_progress(self):
