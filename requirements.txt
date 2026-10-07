@@ -3,3 +3,5 @@ torch>=2.3,<3
 numpy>=1.26,<3
 Pillow>=10,<13
 fonttools>=4.50,<5
+# twist: cached Euclidean distance transforms during data preparation.
+scipy>=1.11,<2

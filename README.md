@@ -1,18 +1,18 @@
 # 线条图变换实验
 
-本仓库保留两条独立路线：原有的手写字生成模型位于 [`DiT-flow/`](DiT-flow/README.md)；新的连续几何变形方案位于 [`twist/`](twist/README.md)。`twist` 当前只做设计，不包含模型或训练代码。
+本仓库保留两条独立路线：原有的手写字生成模型位于 [`DiT-flow/`](DiT-flow/README.md)；通用线条图连续几何变形模型位于 [`twist/`](twist/README.md)。`twist` 已实现串联配准、几何约束和三类 loss。
 
 ## 目录
 
 | 路径 | 用途 |
 |---|---|
 | [`DiT-flow/`](DiT-flow/README.md) | 原 Glyph2Hand 的模型、配置、CASIA 数据处理、训练入口、测试和设计文档 |
-| [`twist/`](twist/README.md) | 通用线条图连续变形的规划与后续独立实现 |
+| [`twist/`](twist/README.md) | 通用线条图串联 Transformer 配准、几何约束与 loss |
 | `fonts/` | 公共字体资源 |
 | [`One-DM/`](One-DM/README.md) | 保留原位置的参考项目 |
 | [`readme/`](readme/README.md) | 公共技术分析；原 DiT-flow 的 LaTeX 和 PDF 已移到 `DiT-flow/readme/` |
 | [`essays/`](essays/README.md) | 公共论文资料 |
-| [`requirements.txt`](requirements.txt) | 现有公共依赖；twist 需要的额外依赖等方案验证后再确定 |
+| [`requirements.txt`](requirements.txt) | 公共依赖，含 twist 距离场预处理使用的 SciPy |
 | `data/`、`runs/` | 数据和实验结果的根目录，按用途或实现分子目录；当前检出的仓库不含这些数据与结果 |
 
 现有 `data.py` 依赖字符标签、CASIA 和书写者采样，先随原实现保留。梯度诊断等可复用工具也先保持原来的调用关系；等 `twist` 确实需要时再提取到根目录的公共模块。
@@ -33,6 +33,6 @@ python -m unittest discover -s tests -v
 
 ## twist 的当前目标
 
-输入两张近似同构的线条图 A、B，生成一条合理的连续轨迹，并能查询任意 `t ∈ [0,1]` 的画面。主结构由平滑、可逆的空间变形场约束；小幅外观修正仅用于亮度和已确认的微小噪声。任务不依赖汉字标签，也不以少样本风格生成作为首版目标。
+输入两张近似同构的线条图 A、B，通过固定边界、受 Lipschitz 约束的小残差采样变换串联，生成可查询任意 `t ∈ [0,1]` 的轨迹。三类 loss 为软平衡 MSE、原始 A 的距离场匹配与形变正则，不需要真实变形场或中间帧标签。任务不依赖汉字标签；数据生成、完整训练入口和外观分支尚未实现。
 
 完整规划见 [`twist/DESIGN.md`](twist/DESIGN.md)。
