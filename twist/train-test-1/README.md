@@ -4,6 +4,8 @@
 
 数据沿用 [DiT-flow/TRAINING.md](../../DiT-flow/TRAINING.md) 的预处理结果：仓库根目录 `data/prepared/{manifest.json,standards.npy,writers/}`。无需重新处理 GNT。已有图像尺寸不同会先缩放到模型尺寸。
 
+新训练在缩放后，对每张 A、B 分别使用 `2 * (pixel - min) / (max - min) - 1`，阈值 0 判断前景。恒定的手写图跳过并记录在 `run.json` 的 `glyphs.excluded_images`；恒定标准图无法作为 A，会报错。旧版单字检查点续训保留其中已缓存的输入与距离场，若要使用逐图 min–max 归一化，请用新目录从零训练。
+
 ## 云主机运行
 
 复制仓库的 `twist/` 和 `requirements.txt`；保留云主机已有的 `data/prepared/`。下面从仓库根目录运行，CUDA 版 PyTorch 需已安装：

@@ -18,6 +18,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1]))
 
 from twist import distance_fields
+from twist.images import NORMALIZATION
 from pairs import PreparedPairs, ShuffledPairSampler
 from train import parse_args, train
 
@@ -85,6 +86,70 @@ class PairTrainingTests(unittest.TestCase):
             torch.testing.assert_close(sampler.next(4), restored.next(4), rtol=0, atol=0)
             self.assertGreater(sampler.epoch_progress, 1)
 
+    def test_faint_images_normalize_independently_and_have_foreground(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture(root)
+            for writer, path in enumerate(sorted((root / "writers").glob("*.npy"))):
+                pixels = np.load(path)
+                # 全部原始像素 > 127.5；不同 writer 有不同亮度与对比度。
+                np.save(path, np.where(pixels == 0, 190 + writer * 5, 250 + writer).astype(np.uint8))
+            data = prepared(root)
+            generator = torch.Generator().manual_seed(12)
+            for split in ("train", "val"):
+                a, b, d = data.batch(data.match(data.records[split], generator), "cpu")
+                for image in (a, b):
+                    torch.testing.assert_close(image.amin(dim=(1, 2, 3)), -torch.ones(len(image)))
+                    torch.testing.assert_close(image.amax(dim=(1, 2, 3)), torch.ones(len(image)))
+                torch.testing.assert_close(d, distance_fields(a, threshold=0))
+                self.assertTrue(bool((d > 0).any()))
+
+    def test_minmax_is_applied_after_resizing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture(root)
+            path = root / "writers" / "00000.npy"
+            pixels = np.load(path)
+            pixels[0] = 255
+            pixels[0, 7, 7] = 200
+            np.save(path, pixels)
+            data = PreparedPairs(root, image_size=8, threshold=0, verbose=False)
+            image = data.normalized(torch.tensor([0]), "cpu")
+            self.assertEqual(tuple(image.shape), (1, 1, 8, 8))
+            self.assertEqual(float(image.min()), -1)
+            self.assertEqual(float(image.max()), 1)
+            self.assertTrue(bool(torch.isfinite(distance_fields(image)).all()))
+
+    def test_constant_images_are_excluded_from_both_sides_before_pairing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture(root)
+            for writer, position, value in ((0, 2, 255), (1, 1, 200), (3, 0, 0)):
+                path = root / "writers" / f"{writer:05d}.npy"
+                pixels = np.load(path)
+                pixels[position] = value
+                np.save(path, pixels)
+            data = prepared(root)
+            self.assertEqual(data.constant_skipped, {"train": 2, "val": 1})
+            self.assertEqual(data.skipped, {"train": 0, "val": 2})
+            self.assertEqual([image["index"] for image in data.invalid_images], [2, 4, 7])
+            self.assertEqual(data.invalid_images[1]["writer"], "1")
+            self.assertEqual(data.invalid_images[1]["character"], "中")
+            self.assertEqual(data.invalid_images[1]["pixel_min"], 200)
+            self.assertFalse(set(data.partners.tolist()) & {2, 4, 7})
+            generator = torch.Generator().manual_seed(12)
+            for split in ("train", "val"):
+                pairs = data.match(data.records[split].repeat(10), generator)
+                self.assertFalse(set(pairs.flatten().tolist()) & {2, 4, 7})
+                data.batch(pairs, "cpu")
+
+    def test_resume_rejects_old_normalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "old.pt"
+            torch.save({"kind": "twist-all-pair", "version": 1}, checkpoint)
+            with self.assertRaisesRegex(ValueError, "different normalization"):
+                self.run_training(["--resume", checkpoint, "--device", "cpu"])
+
     def test_preloaded_pixels_and_bounded_distance_cache_do_not_reopen_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "data"
@@ -135,6 +200,8 @@ class PairTrainingTests(unittest.TestCase):
             torch.testing.assert_close(whole["validation_pairs"], resumed["validation_pairs"], rtol=0, atol=0)
             self.assertNotIn("pixels", resumed)
             self.assertNotIn("distance_cache", resumed)
+            self.assertEqual(resumed["normalization"], NORMALIZATION)
+            self.assertEqual(json.loads((root / "split" / "excluded_images.json").read_text()), [])
             self.assertEqual(resumed["validation"]["count"], 4)
             self.assertEqual(resumed["validation"]["evaluated_step"], 5)
             self.assertTrue(all(bound <= 0.8 for bound in resumed["validation"]["stage_lipschitz_max"]))
@@ -147,6 +214,18 @@ class PairTrainingTests(unittest.TestCase):
             (root / "data" / "manifest.json").write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "manifest differs"):
                 self.run_training(["--data", root / "data", "--device", "cpu", "--resume", root / "split" / "last.pt"])
+
+    def test_resume_rejects_changed_eligible_source_pool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root / "data")
+            self.run_training([*self.common(root), "--output", root / "run", "--stop-after", 1])
+            path = root / "data" / "writers" / "00000.npy"
+            pixels = np.load(path)
+            pixels[0] = 255
+            np.save(path, pixels)
+            with self.assertRaisesRegex(ValueError, "pairs differ"):
+                self.run_training(["--data", root / "data", "--device", "cpu", "--resume", root / "run" / "last.pt"])
 
     def test_interrupt_finishes_one_update_and_saves_sampler_and_optimizer(self):
         with tempfile.TemporaryDirectory() as directory:

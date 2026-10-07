@@ -72,6 +72,30 @@ class TrainingTests(unittest.TestCase):
             (root / "writers").rename(root / "moved_writers")
             self.assertTrue(torch.isfinite(glyphs["targets"][glyphs["train_indices"]]).all())
 
+    def test_faint_glyphs_use_minmax_and_constant_handwriting_is_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "prepared"
+            prepared_fixture(root)
+            for path in [root / "standards.npy", *sorted((root / "writers").glob("*.npy"))]:
+                pixels = np.load(path)
+                np.save(path, np.where(pixels == 0, 220, 255).astype(np.uint8))
+            path = root / "writers" / "00001.npy"
+            pixels = np.load(path)
+            pixels[1] = 255  # writer1 的「中」，标签顺序为 [十, 中]。
+            np.save(path, pixels)
+            with redirect_stdout(io.StringIO()):
+                glyphs = load_glyphs(root, tiny_model(), LossConfig(), TrainingConfig())
+            self.assertEqual(glyphs["metadata"]["handwriting_count"], 4)
+            self.assertEqual(glyphs["metadata"]["excluded_images"][0]["writer"], "writer1")
+            self.assertEqual(glyphs["metadata"]["train_ids"], ["writer0", "writer2"])
+            self.assertEqual(glyphs["metadata"]["val_ids"], ["writer3", "writer4"])
+            for images in (glyphs["source"], glyphs["targets"]):
+                self.assertTrue(bool((images.amin(dim=(1, 2, 3)) == -1).all()))
+                self.assertTrue(bool((images.amax(dim=(1, 2, 3)) == 1).all()))
+            self.assertTrue(bool(torch.isfinite(glyphs["distance"]).all()))
+            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "constant image"):
+                load_glyphs(root, tiny_model(), LossConfig(), TrainingConfig(), "writer1")
+
     def test_synthetic_target_is_nontrivial_and_has_fixed_boundary_and_known_grid(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "prepared"

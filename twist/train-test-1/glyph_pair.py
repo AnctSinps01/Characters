@@ -12,6 +12,7 @@ import torch
 
 from twist import ModelConfig, LossConfig, distance_fields
 from twist.geometry import composed_grid, constrain_displacement, identity_grid, sample_image
+from twist.images import NORMALIZATION, ConstantImageError, normalize_minmax
 from settings import TrainingConfig
 
 
@@ -29,7 +30,10 @@ def read_glyph(path: Path, index: int, expected_count: int, prepared_size: int,
     if prepared_size != output_size:
         pixels = np.asarray(Image.fromarray(pixels).resize(
             (output_size, output_size), Image.Resampling.LANCZOS)).copy()
-    return torch.from_numpy(pixels).float()[None, None] / 127.5 - 1
+    try:
+        return normalize_minmax(torch.from_numpy(pixels)[None, None])
+    except ConstantImageError as exc:
+        raise ConstantImageError([f"{path}: image {index}"]) from exc
 
 
 def synthetic_target(source: torch.Tensor, model: ModelConfig,
@@ -74,27 +78,39 @@ def load_glyphs(root: Path, model: ModelConfig, loss: LossConfig, training: Trai
     metadata = {
         "character": training.character, "mode": training.mode, "data_root": str(root),
         "manifest_sha256": hashlib.sha256(raw).hexdigest(), "prepared_image_size": size,
-        "image_size": model.image_size,
+        "image_size": model.image_size, "normalization": NORMALIZATION,
     }
     writers = sorted([w for w in manifest["writers"] if label in w["labels"]], key=lambda w: w["id"])
     if not writers:
         raise ValueError(f"No writers contain {training.character!r}")
     if len({w["id"] for w in writers}) != len(writers):
         raise ValueError("duplicate writer IDs")
-    handwriting = []
+    handwriting, usable_writers, excluded = [], [], []
     for i, writer in enumerate(writers):
         if writer["split"] not in ("train", "val"):
             raise ValueError(f"invalid split for writer {writer['id']}")
         if writer["labels"].count(label) != 1:
             raise ValueError(f"duplicate character for writer {writer['id']}")
-        handwriting.append(read_glyph(root / writer["file"], writer["labels"].index(label),
-                                      len(writer["labels"]), size, model.image_size))
+        try:
+            image = read_glyph(root / writer["file"], writer["labels"].index(label),
+                               len(writer["labels"]), size, model.image_size)
+        except ConstantImageError:
+            excluded.append({"writer": writer["id"], "split": writer["split"],
+                             "character": training.character, "reason": "constant_at_input_size"})
+        else:
+            handwriting.append(image)
+            usable_writers.append(writer)
         if (i + 1) % 50 == 0 or i + 1 == len(writers):
             print(f"Loaded {training.character}: {i+1}/{len(writers)} writers", flush=True)
+    if excluded:
+        print(f"Skipped {len(excluded)} constant handwriting images", flush=True)
+    if not handwriting:
+        raise ValueError(f"No nonconstant handwriting contains {training.character!r}")
+    writers = usable_writers
     handwriting = torch.cat(handwriting)
     all_writer_ids = [w["id"] for w in writers]
     metadata.update(loaded_writers=all_writer_ids,
-                    handwriting_count=len(writers),
+                    handwriting_count=len(writers), excluded_images=excluded,
                     loaded_pixel_mib=(handwriting.numel() + source.numel()) * 4 / 1024**2)
     true_grid = true_field = None
     if training.mode == "synthetic":
@@ -106,6 +122,8 @@ def load_glyphs(root: Path, model: ModelConfig, loss: LossConfig, training: Trai
         targets, target_ids = handwriting, all_writer_ids
         if writer_id is not None:
             if writer_id not in all_writer_ids:
+                if any(w["writer"] == writer_id for w in excluded):
+                    raise ValueError(f"Writer {writer_id!r} has a constant image for {training.character!r}")
                 raise ValueError(f"Writer {writer_id!r} does not contain {training.character!r}")
             train_indices, val_indices = [all_writer_ids.index(writer_id)], []
             metadata["overfit_writer"] = writer_id

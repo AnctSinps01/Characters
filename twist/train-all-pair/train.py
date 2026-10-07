@@ -20,6 +20,7 @@ import torch
 from twist import LossConfig, ModelConfig, Twist, registration_loss
 from twist.geometry import identity_grid, lipschitz_bound
 from twist.losses import soft_weighted_mse, source_distance_loss
+from twist.images import NORMALIZATION
 from twist.preview import save_preview, strip, tile
 from pairs import PreparedPairs, ShuffledPairSampler
 from settings import TrainingConfig
@@ -99,6 +100,8 @@ def train(args):
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
     if checkpoint and (checkpoint.get("kind") != "twist-all-pair" or checkpoint.get("version") != 1):
         raise ValueError("expected twist-all-pair checkpoint version 1")
+    if checkpoint and checkpoint.get("normalization") != NORMALIZATION:
+        raise ValueError("Checkpoint uses a different normalization; start a new run in a new --output directory")
     model_config = configured(ModelConfig, args, checkpoint["model_config"] if checkpoint else None)
     loss_config = configured(LossConfig, args, checkpoint["loss_config"] if checkpoint else None)
     training = configured(TrainingConfig, args, checkpoint["training_config"] if checkpoint else None,
@@ -133,6 +136,8 @@ def train(args):
                          storage_device=device if training.preload_to_gpu else "cpu", distance_cache_size=training.distance_cache_size)
     if checkpoint and data.fingerprint != checkpoint["data_fingerprint"]:
         raise ValueError("Prepared manifest differs from checkpoint")
+    if checkpoint and data.pairing_fingerprint != checkpoint["pairing_fingerprint"]:
+        raise ValueError("Eligible same-character pairs differ from checkpoint; start a new run")
     validation_pairs = checkpoint["validation_pairs"] if checkpoint else data.fixed_validation(
         training.val_batches * training.batch_size, training.seed ^ 0x6A09E667)
     previews = preview_indices(data, validation_pairs, training.preview_samples)
@@ -149,6 +154,7 @@ def train(args):
     def precision_context():
         return torch.autocast("cuda", dtype=torch.bfloat16) if precision == "bf16" else nullcontext()
     output.mkdir(parents=True, exist_ok=True)
+    dump_json(output / "excluded_images.json", data.invalid_images)
     preview_descriptions = [data.describe(validation_pairs[i]) for i in previews.tolist()]
     dump_json(output / "preview_pairs.json", preview_descriptions)
     inputs = []
@@ -160,8 +166,11 @@ def train(args):
     parameters = sum(parameter.numel() for parameter in model.parameters())
     run_info = {"model": asdict(model_config), "loss": asdict(loss_config), "training": asdict(training),
                 "data_root": str(data.root), "data_fingerprint": data.fingerprint, "handwriting_count": data.count,
+                "normalization": NORMALIZATION, "constant_images": data.constant_skipped,
+                "pairing_fingerprint": data.pairing_fingerprint,
                 "train_sources": len(data.records["train"]), "val_sources": len(data.records["val"]),
                 "skipped_sources": data.skipped, "validation_pairs": len(validation_pairs),
+                "data_loading_seconds": data.load_timings,
                 "pixel_gib": data.pixel_bytes / 1024**3, "parameters": parameters, "device": str(device),
                 "actual_precision": precision, "torch_version": str(torch.__version__),
                 "resume_from": str(args.resume.resolve()) if args.resume else None}
@@ -182,6 +191,7 @@ def train(args):
         atomic_save({"kind": "twist-all-pair", "version": 1, "step": step, "best_total": best_total,
                      "model_config": asdict(model_config), "loss_config": asdict(loss_config),
                      "training_config": asdict(training), "data_fingerprint": data.fingerprint,
+                     "normalization": NORMALIZATION, "pairing_fingerprint": data.pairing_fingerprint,
                      "validation_pairs": validation_pairs, "sampler": sampler.state_dict(),
                      "model": model.state_dict(), "optimizer": optimizer.state_dict(),
                      "rng_cpu": torch.get_rng_state(),

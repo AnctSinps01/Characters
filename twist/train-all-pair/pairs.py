@@ -5,12 +5,14 @@ from collections import OrderedDict
 import hashlib
 import json
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from twist import distance_fields
+from twist.images import normalize_minmax
 
 
 class PreparedPairs:
@@ -46,30 +48,74 @@ class PreparedPairs:
         if verbose:
             print(f"Preloading {self.count:,} handwriting images: {self.pixel_bytes/1024**3:.3f} GiB uint8 "
                   f"on {self.storage_device}; distance cache <= {distance_cache_size*image_size**2*4/1024**2:.1f} MiB CPU", flush=True)
+        allocation_started = perf_counter()
         self.pixels = torch.empty((self.count, self.prepared_size, self.prepared_size),
                                   dtype=torch.uint8, device=self.storage_device)
         self.labels = torch.empty(self.count, dtype=torch.long)
         self.writer_numbers = torch.empty(self.count, dtype=torch.long)
+        allocation_seconds = perf_counter() - allocation_started
+        # CPU 下 NumPy 直接复制到同一块 Tensor 存储，沿用旧加载器的快速路径。
+        # .numpy() 仅建立共享视图，不创建第二份完整数据。
+        cpu_pixels = self.pixels.numpy() if self.storage_device.type == "cpu" else None
+        self.load_timings = {"allocation_seconds": allocation_seconds, "read_seconds": 0.0,
+                             "copy_seconds": 0.0, "metadata_seconds": 0.0}
+        loading_started = perf_counter()
         split_records = {"train": [], "val": []}
+        self.invalid_images = []
+        self.constant_skipped = {"train": 0, "val": 0}
         start = 0
         for number, writer in enumerate(self.writers):
+            writer_started = perf_counter()
             labels = writer["labels"]
             if writer["split"] not in split_records:
                 raise ValueError(f"invalid split for writer {writer['id']}")
             if len(set(labels)) != len(labels) or any(type(label) is not int or not 0 <= label < len(self.characters) for label in labels):
                 raise ValueError(f"writer {writer['id']} has invalid or duplicate labels")
             count = len(labels)
+            read_started = perf_counter()
             images = np.load(self.root / writer["file"], allow_pickle=False)
+            read_seconds = perf_counter() - read_started
             if images.dtype != np.uint8 or images.shape != (count, self.prepared_size, self.prepared_size):
                 raise ValueError(f"invalid prepared pixels for {writer['id']}: {images.dtype} {images.shape}")
-            self.pixels[start:start+count].copy_(torch.from_numpy(images))
+            copy_started = perf_counter()
+            if cpu_pixels is not None:
+                np.copyto(cpu_pixels[start:start+count], images, casting="no")
+            else:
+                self.pixels[start:start+count].copy_(torch.from_numpy(images))
+            copy_seconds = perf_counter() - copy_started
+            # 先排除恒定图；缩放改变尺寸时，检查实际送入模型的像素。
+            minimum = images.min(axis=(1, 2))
+            maximum = images.max(axis=(1, 2))
+            constant = minimum == maximum
+            if self.image_size != self.prepared_size:
+                for offset in range(0, count, 128):
+                    resized = self.resize(torch.from_numpy(images[offset:offset+128]).unsqueeze(1))
+                    constant[offset:offset+len(resized)] = (
+                        resized.amin(dim=(1, 2, 3)) == resized.amax(dim=(1, 2, 3))).numpy()
+            for index in np.flatnonzero(constant):
+                label = labels[index]
+                self.invalid_images.append({"index": start + int(index), "character": self.characters[label],
+                    "label": label, "writer": writer["id"], "split": writer["split"],
+                    "pixel_min": int(minimum[index]), "pixel_max": int(maximum[index]),
+                    "reason": "constant_at_input_size"})
+            self.constant_skipped[writer["split"]] += int(constant.sum())
             del images
             self.labels[start:start+count] = torch.tensor(labels, dtype=torch.long)
             self.writer_numbers[start:start+count] = number
-            split_records[writer["split"]].append(torch.arange(start, start+count))
+            split_records[writer["split"]].append(torch.arange(start, start+count)[torch.from_numpy(~constant)])
             start += count
+            self.load_timings["read_seconds"] += read_seconds
+            self.load_timings["copy_seconds"] += copy_seconds
+            self.load_timings["metadata_seconds"] += perf_counter() - writer_started - read_seconds - copy_seconds
             if verbose and ((number + 1) % 20 == 0 or number + 1 == len(self.writers)):
-                print(f"Loaded {number+1}/{len(self.writers)} writers", flush=True)
+                print(f"Loaded {number+1}/{len(self.writers)} writers; elapsed={perf_counter()-loading_started:.2f}s "
+                      f"read={self.load_timings['read_seconds']:.2f}s copy={self.load_timings['copy_seconds']:.2f}s "
+                      f"metadata={self.load_timings['metadata_seconds']:.2f}s", flush=True)
+        del cpu_pixels
+        self.load_timings["writers_seconds"] = perf_counter() - loading_started
+        indexing_started = perf_counter()
+        if verbose:
+            print("Preparing same-character partner index...", flush=True)
         self.group_start = torch.full((self.count,), -1, dtype=torch.long)
         self.group_count = torch.zeros(self.count, dtype=torch.long)
         self.group_rank = torch.zeros(self.count, dtype=torch.long)
@@ -96,10 +142,18 @@ class PreparedPairs:
             self.records[split] = torch.cat(usable) if usable else torch.empty(0, dtype=torch.long)
             self.skipped[split] = len(records) - len(self.records[split])
         self.partners = torch.cat(groups) if groups else torch.empty(0, dtype=torch.long)
+        pairing_hash = hashlib.sha256()
+        for split in ("train", "val"):
+            pairing_hash.update(split.encode("ascii"))
+            pairing_hash.update(self.records[split].numpy().tobytes())
+        self.pairing_fingerprint = pairing_hash.hexdigest()
         if not len(self.records["train"]) or not len(self.records["val"]):
             raise ValueError("train and val must each contain a character written by at least two different writers")
+        self.load_timings["index_seconds"] = perf_counter() - indexing_started
         if verbose:
-            print(f"Eligible source images: train={len(self.records['train']):,}, val={len(self.records['val']):,}; "
+            print(f"Partner index prepared in {self.load_timings['index_seconds']:.2f}s; "
+                  f"eligible source images: train={len(self.records['train']):,}, val={len(self.records['val']):,}; "
+                  f"skipped constant images: {self.constant_skipped}; "
                   f"skipped without same-split partner: {self.skipped}", flush=True)
 
     def match(self, sources, generator):
@@ -120,11 +174,15 @@ class PreparedPairs:
             selected = selected[:count]
         return self.match(selected, generator)
 
-    def normalized(self, indices, device):
-        images = self.pixels[indices.to(self.storage_device)].to(device=device, dtype=torch.float32).unsqueeze(1) / 127.5 - 1
+    def resize(self, images):
+        images = images.to(dtype=torch.float32)
         if self.image_size != self.prepared_size:
             images = F.interpolate(images, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False, antialias=True)
         return images
+
+    def normalized(self, indices, device):
+        images = self.pixels[indices.to(self.storage_device)].to(device=device).unsqueeze(1)
+        return normalize_minmax(self.resize(images))
 
     def batch(self, pairs, device):
         pairs = torch.as_tensor(pairs, dtype=torch.long, device="cpu")
