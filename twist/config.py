@@ -53,8 +53,8 @@ class ModelConfig:
 class LossConfig:
     # 总损失为以下三项的加权和；默认比例是实验起点，可在此调整。
     mse_weight: float = 1.0        # 梯度平方加权 MSE 的系数。
-    mse_uniform_ratio: float = 0.1  # MSE 内普通全图误差的占比，其余为 B 的梯度平方加权误差。
-    distance_weight: float = 1.0   # 距离场匹配损失的系数，距离使用归一化坐标单位。
+    mse_uniform_ratio: float = 0.2  # MSE 内普通全图误差的占比，其余为 B 的梯度平方加权误差。
+    distance_weight: float = 0.0   # 距离场匹配损失的系数，距离使用归一化坐标单位。
     deformation_weight: float = 1e-4  # 形变正则的系数。
     # 形变正则 = 弯曲损失 + displacement_ratio * 位移平方损失。
     displacement_ratio: float = 0.01  # 形变正则内部的小位移惩罚比例。
