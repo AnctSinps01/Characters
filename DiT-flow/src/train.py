@@ -14,6 +14,12 @@ import signal
 import sys
 import time
 
+# Also support ``python DiT-flow/src/train.py`` from the repository root.
+# Normal package execution (``python -m src.train``) keeps its existing path.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "src"
+
 from PIL import Image, ImageDraw
 import torch
 from torch.utils.data import DataLoader
