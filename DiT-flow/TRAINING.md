@@ -30,7 +30,7 @@ python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0
 
 ## 4. 先训练 100 步
 
-模型和训练参数直接改 `src/config.py`。每个样本在 `min_references` 到 `max_references` 之间均匀随机抽参考字数。图像尺寸和参考数量上限请在处理数据前确定。
+模型和训练参数直接改 `src/config.py`。每个样本在 `min_references` 到 `max_references` 之间均匀随机抽参考字数。图像尺寸和参考数量上限请在处理数据前确定。训练默认会额外加入作者风格损失（`author_style_loss_weight=0.05`）：固定槽位的风格 token 对同作者使用 `1 - cosine`，对不同作者使用 `cosine²`，分别鼓励一致和正交；设为 `0` 可关闭。这个损失需要 batch 中出现作者索引，数据集会自动提供。
 
 训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。更新训练代码后无需重新 prepare。
 

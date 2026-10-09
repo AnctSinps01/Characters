@@ -187,6 +187,9 @@ class HandwritingEpisodes(Dataset):
             raise ValueError("preloaded glyphs belong to a different data directory")
         self.manifest = self._preloaded.manifest
         self.fingerprint = self._preloaded.fingerprint
+        self.writer_indices = {
+            writer["id"]: index for index, writer in enumerate(self.manifest["writers"])
+        }
         if not 1 <= min_references <= max_references:
             raise ValueError("expected 1 <= min_references <= max_references")
         if length < 1:
@@ -243,4 +246,9 @@ class HandwritingEpisodes(Dataset):
             "reference_handwriting": ref_hand,
             "reference_standard": ref_std,
             "reference_mask": mask,
+            # A stable integer makes author-pair masks cheap in the training
+            # loss while keeping string IDs out of device transfer/collation.
+            "author_index": torch.tensor(
+                self.writer_indices[writer["id"]], dtype=torch.long, device=hands.device
+            ),
         }

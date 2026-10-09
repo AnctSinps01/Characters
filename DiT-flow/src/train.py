@@ -18,7 +18,14 @@ from PIL import Image, ImageDraw
 import torch
 from torch.utils.data import DataLoader
 
-from . import Glyph2Hand, ModelConfig, build_flow_matching_batch, flow_matching_loss, sample_euler
+from . import (
+    Glyph2Hand,
+    ModelConfig,
+    author_style_loss,
+    build_flow_matching_batch,
+    flow_matching_loss,
+    sample_euler,
+)
 from .config import TrainingConfig
 from .data import HandwritingEpisodes, PreloadedGlyphs, read_manifest
 from .diagnostics import GradientSnapshot, json_number
@@ -71,11 +78,21 @@ def metrics_json(metrics: dict) -> str:
 
 def batch_loss(model, batch):
     flow = build_flow_matching_batch(batch["target_standard"], batch["target_handwriting"], model.config.sigma)
-    prediction = model(flow.state, flow.times,
-                       batch["reference_handwriting"], batch["reference_standard"],
-                       batch["reference_mask"])
+    # Encode once so the same fixed-size style representation drives both the
+    # velocity objective and the optional author-level regularizer.
+    style = model.encode_style(
+        batch["reference_handwriting"], batch["reference_standard"],
+        batch["reference_mask"]
+    )
+    prediction = model.predict_velocity(flow.state, flow.times, style)
     # Accumulate the MSE in float32 even under autocast.
-    return flow_matching_loss(prediction.float(), flow.target_velocity.float())
+    loss = flow_matching_loss(prediction.float(), flow.target_velocity.float())
+    style_weight = getattr(model, "author_style_loss_weight", 0.0)
+    if style_weight:
+        if "author_index" not in batch:
+            raise ValueError("author_style_loss_weight requires author_index in each batch")
+        loss = loss + style_weight * author_style_loss(style, batch["author_index"])
+    return loss
 
 
 def optimizer_update(model, optimizer, scaler, batches, device, precision, config,
@@ -351,7 +368,12 @@ def run(args):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     model = Glyph2Hand(model_config).to(device).train()
+    # Copy the EMA before attaching the training-only regularizer so validation
+    # continues to report the flow-matching objective by itself.
     ema = copy.deepcopy(model).eval().requires_grad_(False)
+    # Keep this runtime-only: it is restored from TrainingConfig and should not
+    # become a model parameter or alter the checkpoint state-dict format.
+    model.author_style_loss_weight = config.author_style_loss_weight
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
                                   betas=(0.9, 0.95), weight_decay=config.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")

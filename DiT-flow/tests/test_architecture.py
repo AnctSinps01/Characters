@@ -7,6 +7,7 @@ import torch
 from src import (
     Glyph2Hand,
     ModelConfig,
+    author_style_loss,
     build_flow_matching_batch,
     flow_matching_loss,
     sample_euler,
@@ -31,6 +32,29 @@ def tiny_config() -> ModelConfig:
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_author_style_loss_uses_fixed_token_slots(self) -> None:
+        # Each author owns an orthogonal direction in every fixed token slot;
+        # equal-author tokens should therefore give zero loss.
+        basis = torch.stack((
+            torch.tensor([[1.0, 0.0, 0.0]]).expand(2, -1),
+            torch.tensor([[1.0, 0.0, 0.0]]).expand(2, -1),
+            torch.tensor([[0.0, 1.0, 0.0]]).expand(2, -1),
+        ))
+        authors = torch.tensor([0, 0, 1])
+        loss = author_style_loss(basis, authors)
+        self.assertAlmostEqual(loss.item(), 0.0, places=6)
+
+        changed = basis.clone()
+        changed[1, 0] = torch.tensor([0.0, 1.0, 0.0])
+        self.assertGreater(author_style_loss(changed, authors).item(), 0.1)
+
+    def test_author_style_loss_handles_missing_pair_types(self) -> None:
+        tokens = torch.randn(1, 3, 8, requires_grad=True)
+        loss = author_style_loss(tokens, torch.tensor([4]))
+        self.assertEqual(loss.item(), 0.0)
+        loss.backward()
+        self.assertIsNotNone(tokens.grad)
+
     def test_set_pool_depth_must_be_positive(self) -> None:
         with self.assertRaises(ValueError):
             ModelConfig(set_pool_depth=0)

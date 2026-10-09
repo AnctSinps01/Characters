@@ -77,6 +77,7 @@ class TrainingConfig:
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
     ema_decay: float = 0.999
+    author_style_loss_weight: float = 0.05  # Same-author/orthogonal-author token loss
     precision: str = "bf16"
     preload_to_gpu: bool = False          # Keep prepared uint8 glyphs in VRAM
     workers: int = 8
@@ -102,6 +103,9 @@ class TrainingConfig:
         for name in ("learning_rate", "gradient_clip"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if (not math.isfinite(self.author_style_loss_weight)
+                or self.author_style_loss_weight < 0):
+            raise ValueError("author_style_loss_weight must be finite and nonnegative")
         if not 0 <= self.min_lr_ratio <= 1 or not 0 <= self.ema_decay < 1:
             raise ValueError("invalid min_lr_ratio or ema_decay")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
