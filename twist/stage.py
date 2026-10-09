@@ -1,11 +1,11 @@
-"""A single registration stage: current A and fixed B -> constrained u."""
+"""A single velocity network with stacked SA / CA / FFN blocks."""
 from __future__ import annotations
 
 from torch import Tensor, nn
 import torch.nn.functional as F
 
 from .config import ModelConfig
-from .geometry import constrain_displacement
+from .geometry import zero_boundary
 from .layers import DualStreamBlock, PatchEmbedding
 
 
@@ -28,21 +28,21 @@ class RegistrationStage(nn.Module):
         self.config = config or ModelConfig()
         self.patch_embedding = PatchEmbedding(self.config)  # Shared by A and B.
         self.blocks = nn.ModuleList(
-            DualStreamBlock(self.config) for _ in range(self.config.blocks_per_stage))
+            DualStreamBlock(self.config) for _ in range(self.config.num_blocks))
         self.output_norm = nn.LayerNorm(self.config.token_dim)
-        self.displacement_head = nn.Linear(self.config.token_dim, 2)
-        nn.init.normal_(self.displacement_head.weight, std=self.config.head_init_std)
-        nn.init.zeros_(self.displacement_head.bias)
+        self.velocity_head = nn.Linear(self.config.token_dim, 2)
+        nn.init.normal_(self.velocity_head.weight, std=self.config.head_init_std)
+        nn.init.zeros_(self.velocity_head.bias)
 
-    def forward(self, current_source: Tensor, target: Tensor) -> Tensor:
-        validate_pair(current_source, target, self.config)
-        source_tokens = self.patch_embedding(current_source)
+    def forward(self, source: Tensor, target: Tensor) -> Tensor:
+        validate_pair(source, target, self.config)
+        source_tokens = self.patch_embedding(source)
         target_tokens = self.patch_embedding(target)
         for block in self.blocks:
             source_tokens, target_tokens = block(source_tokens, target_tokens)
-        # B's updated query tokens decode the output-frame sampling displacement.
-        vectors = self.displacement_head(self.output_norm(target_tokens))
+        # B's query tokens decode one stationary backward velocity field.
+        vectors = self.velocity_head(self.output_norm(target_tokens))
         size = self.config.patch_grid_size
         interior = vectors.transpose(1, 2).reshape(vectors.shape[0], 2, size, size)
         controls = F.pad(interior, (1, 1, 1, 1))
-        return constrain_displacement(controls, self.config.lipschitz_limit)
+        return zero_boundary(controls)

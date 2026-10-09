@@ -104,12 +104,14 @@ class PairTrainingTests(unittest.TestCase):
             data = prepared(root)
             generator = torch.Generator().manual_seed(12)
             for split in ("train", "val"):
-                a, b, d = data.batch(data.match(data.records[split], generator), "cpu")
+                a, b, distance_a, distance_b = data.batch(data.match(data.records[split], generator), "cpu")
                 for image in (a, b):
                     torch.testing.assert_close(image.amin(dim=(1, 2, 3)), -torch.ones(len(image)))
                     torch.testing.assert_close(image.amax(dim=(1, 2, 3)), torch.ones(len(image)))
-                torch.testing.assert_close(d, distance_fields(a, threshold=0))
-                self.assertTrue(bool((d > 0).any()))
+                torch.testing.assert_close(distance_a, distance_fields(a, threshold=0))
+                torch.testing.assert_close(distance_b, distance_fields(b, threshold=0))
+                self.assertTrue(bool((distance_a > 0).any()))
+                self.assertTrue(bool((distance_b > 0).any()))
 
     def test_minmax_is_applied_after_resizing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,29 +155,74 @@ class PairTrainingTests(unittest.TestCase):
     def test_resume_rejects_old_normalization(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "old.pt"
-            torch.save({"kind": "twist-all-pair", "version": 1}, checkpoint)
+            torch.save({"kind": "twist-all-pair", "version": 2}, checkpoint)
             with self.assertRaisesRegex(ValueError, "different normalization"):
+                self.run_training(["--resume", checkpoint, "--device", "cpu"])
+
+    def test_default_training_uses_three_losses_and_rejects_displacement_checkpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root / "data")
+            with patch("pairs.distance_fields", wraps=distance_fields) as transform:
+                self.run_training([*self.common(root), "--output", root / "run", "--stop-after", 1])
+                self.assertGreater(transform.call_count, 0)
+            run = json.loads((root / "run" / "run.json").read_text())
+            self.assertEqual(run["loss"]["similarity_weight"], 1)
+            self.assertEqual(run["loss"]["distance_weight"], 1)
+            self.assertNotIn("folding_weight", run["loss"])
+            saved = torch.load(root / "run" / "last.pt", weights_only=True)
+            values = saved["validation"]
+            self.assertGreater(values["forward_distance"], 0)
+            self.assertGreater(values["reverse_distance"], 0)
+            self.assertAlmostEqual(values["distance"], values["forward_distance"] + values["reverse_distance"], places=6)
+            self.assertAlmostEqual(values["total"], values["similarity"] + values["distance"]
+                                   + 0.001*values["smoothness"], places=6)
+            checkpoint = root / "old.pt"
+            torch.save({"kind": "twist-all-pair", "version": 1}, checkpoint)
+            with self.assertRaisesRegex(ValueError, "stationary-velocity"):
                 self.run_training(["--resume", checkpoint, "--device", "cpu"])
 
     def test_preloaded_pixels_and_bounded_distance_cache_do_not_reopen_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "data"
             fixture(root)
-            data = prepared(root, cache_size=1)
+            data = prepared(root, cache_size=2)
             generator = torch.Generator().manual_seed(12)
             pair = data.match(data.records["train"][:1], generator)
             (root / "writers").rename(root / "moved")
             with patch("pairs.distance_fields", wraps=distance_fields) as transform:
-                a, b, distance = data.batch(pair, "cpu")
+                a, b, distance_a, distance_b = data.batch(pair, "cpu")
                 data.batch(pair, "cpu")
+                data.batch(pair.flip(1), "cpu")
                 self.assertEqual(transform.call_count, 1)
-                torch.testing.assert_close(distance, distance_fields(a))
+                self.assertEqual(transform.call_args.args[0].shape[0], 2)
+                torch.testing.assert_close(distance_a, distance_fields(a))
+                torch.testing.assert_close(distance_b, distance_fields(b))
                 more = data.match(data.records["train"][:3], generator)
                 data.batch(more, "cpu")
-            self.assertEqual(len(data.distance_cache), 1)
+            self.assertEqual(len(data.distance_cache), 2)
             for field in data.distance_cache.values():
                 self.assertEqual(field.untyped_storage().nbytes(), 16 * 16 * 4)
             self.assertEqual(a.shape, b.shape)
+
+    def test_small_cache_deduplicates_both_roles_without_losing_batch_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture(root)
+            data = prepared(root, cache_size=1)
+            generator = torch.Generator().manual_seed(12)
+            pair = data.match(data.records["train"][:1], generator)
+            pairs = torch.cat((pair, pair.flip(1), pair))
+            with patch("pairs.distance_fields", wraps=distance_fields) as transform:
+                a, b, distance_a, distance_b = data.batch(pairs, "cpu")
+                self.assertEqual(transform.call_count, 1)
+                self.assertEqual(transform.call_args.args[0].shape[0], 2)
+            self.assertEqual(len(data.distance_cache), 1)
+            torch.testing.assert_close(distance_a, distance_fields(a))
+            torch.testing.assert_close(distance_b, distance_fields(b))
+            _, _, no_a, no_b = data.batch(pairs, "cpu", with_distance=False)
+            self.assertIsNone(no_a)
+            self.assertIsNone(no_b)
 
     def run_training(self, arguments):
         with patch.object(sys, "argv", ["train.py", *map(str, arguments)]), redirect_stdout(io.StringIO()):
@@ -184,7 +231,7 @@ class PairTrainingTests(unittest.TestCase):
     def common(self, root):
         return ["--data", root / "data", "--device", "cpu", "--precision", "fp32", "--steps", 5,
                 "--image-size", 16, "--patch-size", 4, "--token-dim", 16, "--num-heads", 4,
-                "--blocks-per-stage", 1, "--num-stages", 2, "--batch-size", 4,
+                "--num-blocks", 2, "--squaring-steps", 5, "--batch-size", 4,
                 "--log-every", 1, "--validate-every", 2, "--save-every", 2,
                 "--val-batches", 2, "--preview-samples", 2, "--animation-frames", 3]
 
@@ -214,7 +261,11 @@ class PairTrainingTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "split" / "excluded_images.json").read_text()), [])
             self.assertEqual(resumed["validation"]["count"], 4)
             self.assertEqual(resumed["validation"]["evaluated_step"], 5)
-            self.assertTrue(all(bound <= 0.8 for bound in resumed["validation"]["stage_lipschitz_max"]))
+            self.assertGreater(resumed["validation"]["velocity_max"], 0)
+            self.assertGreater(resumed["validation"]["jacobian_min"], 0)
+            self.assertEqual(resumed["validation"]["folding_fraction"], 0)
+            self.assertEqual(resumed["model_config"]["num_blocks"], 2)
+            self.assertEqual(resumed["model_config"]["squaring_steps"], 5)
             descriptions = json.loads((root / "split" / "preview_pairs.json").read_text(encoding="utf-8"))
             self.assertEqual(len(descriptions), 2)
             with Image.open(next((root / "split" / "previews").glob("step_0000005_*_trajectory.gif"))) as gif:
@@ -262,10 +313,9 @@ class PairTrainingTests(unittest.TestCase):
                 animation_frames: int = 3
             @dataclass(frozen=True)
             class CurrentLoss(LossConfig):
-                mse_weight: float = 10
+                similarity_weight: float = 10
                 distance_weight: float = 20
-                deformation_weight: float = 0.001
-                displacement_ratio: float = 0.02
+                smoothness_weight: float = 0.001
                 mse_uniform_ratio: float = 0.2
             # 在同一步重新评估，以验证仅改 loss 时模型、优化器与配对状态保持原值。
             with patch("train.TrainingConfig", CurrentTraining), patch("train.LossConfig", CurrentLoss), \
@@ -286,7 +336,7 @@ class PairTrainingTests(unittest.TestCase):
             self.assertEqual(run["loss"]["mse_uniform_ratio"], 0.2)
             self.assertEqual(after["validation"]["count"], 2)
             validation = after["validation"]
-            expected = 10 * validation["mse"] + 20 * validation["distance"] + 0.001 * validation["deformation"]
+            expected = 10 * validation["similarity"] + 20 * validation["distance"] + 0.001 * validation["smoothness"]
             self.assertAlmostEqual(validation["total"], expected, places=5)
             self.assertAlmostEqual(best["best_total"], best["validation"]["total"], places=7)
             self.assertLessEqual(best["best_total"], validation["total"] + 1e-7)

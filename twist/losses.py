@@ -1,8 +1,8 @@
-"""Three losses: gradient-weighted image MSE, source distance, and deformation."""
+"""Exactly three objectives: bidirectional similarity, distance, and velocity smoothness."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Sequence
+import math
 
 import torch
 import torch.nn.functional as F
@@ -14,13 +14,13 @@ from .model import RegistrationResult
 
 
 def foreground_weights(images: Tensor) -> Tensor:
-    """Soft ink occupancy, without a learned mask or foreground tuning knob."""
-    return ((1 - images.float().mean(dim=1, keepdim=True)) / 2).clamp(0, 1)
+    """Detached soft foreground: black=1, white=0, gray retains ink coverage."""
+    return ((1 - images.detach().float().mean(dim=1, keepdim=True)) / 2).clamp(0, 1)
 
 
 def gradient_weighted_mse(prediction: Tensor, target: Tensor,
                           uniform_ratio: float = 0.1, epsilon: float = 1e-8) -> Tensor:
-    """Emphasize B's edges while retaining a uniform image-error component.
+    """Emphasize the reference image's edges and retain uniform image error.
 
     Sobel gradients use replicate padding so the canvas boundary does not
     create an artificial edge. Normalize gradient energy independently for
@@ -49,6 +49,8 @@ def gradient_weighted_mse(prediction: Tensor, target: Tensor,
 def source_distance_loss(grid: Tensor, target: Tensor, source_distance: Tensor,
                          epsilon: float = 1e-8) -> Tensor:
     """B foreground q should sample original A close to A's foreground."""
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("epsilon must be finite and positive")
     expected = (target.shape[0], 1, *target.shape[-2:])
     if source_distance.shape != expected or grid.shape != (*expected[:1], *expected[2:], 2):
         raise ValueError("distance must be [B,1,H,W] and grid [B,H,W,2] matching target")
@@ -58,52 +60,57 @@ def source_distance_loss(grid: Tensor, target: Tensor, source_distance: Tensor,
     foreground = foreground_weights(target)
     mass = foreground.sum(dim=(1, 2, 3))
     error = (foreground * sampled.square()).sum(dim=(1, 2, 3))
-    return (error / mass.clamp_min(epsilon)).mean()
+    return (error / (mass + epsilon)).mean()
 
 
-def bending_energy(displacement: Tensor) -> Tensor:
-    """Discrete control-grid Hessian energy, with normalized grid spacing."""
-    if displacement.ndim != 4 or displacement.shape[1] != 2:
-        raise ValueError("displacement must have shape [B,2,Hc,Wc]")
-    height, width = displacement.shape[-2:]
-    if min(height, width) < 3:
-        raise ValueError("bending requires at least three control nodes per dimension")
-    field = displacement.float()
-    center = field[:, :, 1:-1, 1:-1]
-    dxx = (field[:, :, 1:-1, 2:] - 2 * center + field[:, :, 1:-1, :-2]) * (width - 1)**2
-    dyy = (field[:, :, 2:, 1:-1] - 2 * center + field[:, :, :-2, 1:-1]) * (height - 1)**2
-    dxy = (field[:, :, 2:, 2:] - field[:, :, 2:, :-2]
-           - field[:, :, :-2, 2:] + field[:, :, :-2, :-2]) * ((width - 1) * (height - 1) / 4)
-    return (dxx.square() + 2 * dxy.square() + dyy.square()).sum(dim=1).mean()
+def velocity_smoothness(velocity: Tensor) -> Tensor:
+    """Viscous H1 energy: ||dv/dx||^2 + ||dv/dy||^2, with normalized spacing.
 
-
-def deformation_components(displacements: Sequence[Tensor]) -> tuple[Tensor, Tensor]:
-    if not displacements:
-        raise ValueError("deformation regularization needs at least one displacement")
-    bending = torch.stack([bending_energy(field) for field in displacements]).mean()
-    movement = torch.stack([field.float().square().sum(dim=1).mean()
-                            for field in displacements]).mean()
-    return bending, movement
+    Penalize first derivatives mildly; no hard incompressibility, bending,
+    or velocity-magnitude penalty is imposed.
+    """
+    if velocity.ndim != 4 or velocity.shape[1] != 2 or min(velocity.shape[-2:]) < 2:
+        raise ValueError("velocity must have shape [B,2,H>=2,W>=2]")
+    field = velocity.float()
+    height, width = field.shape[-2:]
+    dx = (field[..., 1:] - field[..., :-1]) * (width - 1)
+    dy = (field[..., 1:, :] - field[..., :-1, :]) * (height - 1)
+    return dx.square().sum(dim=1).mean() + dy.square().sum(dim=1).mean()
 
 
 @dataclass(frozen=True)
 class LossBreakdown:
     total: Tensor
-    mse: Tensor
+    similarity: Tensor
     distance: Tensor
-    deformation: Tensor
-    bending: Tensor
-    displacement: Tensor
+    smoothness: Tensor
+    forward_similarity: Tensor
+    reverse_similarity: Tensor
+    forward_distance: Tensor
+    reverse_distance: Tensor
 
 
-def registration_loss(result: RegistrationResult, target: Tensor,
-                      source_distance: Tensor, config: LossConfig | None = None) -> LossBreakdown:
-    """Train the fitted endpoint, not an independently predicted intermediate frame."""
+def registration_loss(result: RegistrationResult, source_distance: Tensor,
+                      target_distance: Tensor, config: LossConfig | None = None) -> LossBreakdown:
+    """Sum the two directions for similarity and Chamfer; smooth unscaled v.
+
+    Both original-image distance fields must be precomputed. Foreground
+    weights and distance fields are detached; gradients pass through sampling
+    maps to the velocity network.
+    """
     config = config or LossConfig()
-    mse = gradient_weighted_mse(result.image, target, config.mse_uniform_ratio, config.epsilon)
-    distance = source_distance_loss(result.grid, target, source_distance, config.epsilon)
-    bending, movement = deformation_components(result.displacements)
-    deformation = bending + config.displacement_ratio * movement
-    total = (config.mse_weight * mse + config.distance_weight * distance
-             + config.deformation_weight * deformation)
-    return LossBreakdown(total, mse, distance, deformation, bending, movement)
+    forward_similarity = gradient_weighted_mse(
+        result.image, result.target, config.mse_uniform_ratio, config.epsilon)
+    reverse_similarity = gradient_weighted_mse(
+        result.reverse_image, result.source, config.mse_uniform_ratio, config.epsilon)
+    similarity = forward_similarity + reverse_similarity
+    forward_distance = source_distance_loss(
+        result.grid, result.target, source_distance, config.epsilon)
+    reverse_distance = source_distance_loss(
+        result.reverse_grid, result.source, target_distance, config.epsilon)
+    distance = forward_distance + reverse_distance
+    smoothness = velocity_smoothness(result.velocity)
+    total = (config.similarity_weight * similarity + config.distance_weight * distance
+             + config.smoothness_weight * smoothness)
+    return LossBreakdown(total, similarity, distance, smoothness, forward_similarity,
+                         reverse_similarity, forward_distance, reverse_distance)

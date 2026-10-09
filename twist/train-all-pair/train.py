@@ -19,7 +19,7 @@ import torch
 
 from twist import LossConfig, ModelConfig, Twist, registration_loss
 from twist.checkpoint import optimizer_state, restore_optimizer, state_only
-from twist.geometry import identity_grid, lipschitz_bound
+from twist.geometry import identity_grid, jacobian_determinant
 from twist.losses import gradient_weighted_mse, source_distance_loss
 from twist.images import NORMALIZATION
 from twist.preview import save_preview
@@ -99,8 +99,8 @@ def train(args):
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         torch.cuda.set_device(device)
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
-    if checkpoint and (checkpoint.get("kind") != "twist-all-pair" or checkpoint.get("version") != 1):
-        raise ValueError("expected twist-all-pair checkpoint version 1")
+    if checkpoint and (checkpoint.get("kind") != "twist-all-pair" or checkpoint.get("version") != 2):
+        raise ValueError("expected stationary-velocity twist-all-pair checkpoint version 2; start a new run")
     if checkpoint and checkpoint.get("normalization") != NORMALIZATION:
         raise ValueError("Checkpoint uses a different normalization; start a new run in a new --output directory")
     model_config = configured(ModelConfig, args, checkpoint["model_config"] if checkpoint else None)
@@ -172,7 +172,8 @@ def train(args):
     best_total = math.inf
     step, latest_validation = start_step, None
     started = time.monotonic()
-    loss_names = ("total", "mse", "distance", "deformation", "bending", "displacement")
+    loss_names = ("total", "similarity", "distance", "smoothness", "forward_similarity",
+                  "reverse_similarity", "forward_distance", "reverse_distance")
 
     def append_metrics(record):
         record["loss_config"] = asdict(loss_config)
@@ -181,7 +182,7 @@ def train(args):
 
     def save_checkpoint(name):
         # 不打包全量字图或距离缓存，检查点大小主要由模型/优化器决定。
-        atomic_save({"kind": "twist-all-pair", "version": 1, "step": step, "best_total": best_total,
+        atomic_save({"kind": "twist-all-pair", "version": 2, "step": step, "best_total": best_total,
                      "model_config": asdict(model_config), "data_fingerprint": data.fingerprint,
                      "normalization": NORMALIZATION, "pairing_fingerprint": data.pairing_fingerprint,
                      "validation_pairs": validation_pairs, "sampler": sampler.state_dict(),
@@ -192,20 +193,28 @@ def train(args):
 
     @torch.no_grad()
     def evaluate(pairs, identity=False):
-        values = {name: 0.0 for name in (("mse", "distance") if identity else loss_names)}
-        bounds = [0.0] * model_config.num_stages
+        values = {name: 0.0 for name in (("similarity", "distance") if identity else loss_names)}
+        velocity_max, jacobian_min = 0.0, math.inf
+        folded, cell_count = 0, 0
         for chunk in pairs.split(training.batch_size):
-            a, b, d = data.batch(chunk, device)
+            a, b, distance_a, distance_b = data.batch(chunk, device)
             if identity:
                 grid = identity_grid(len(chunk), a.shape[-2:], device=device)
-                losses = {"mse": gradient_weighted_mse(a, b, loss_config.mse_uniform_ratio, loss_config.epsilon),
-                          "distance": source_distance_loss(grid, b, d, loss_config.epsilon)}
+                losses = {"similarity": gradient_weighted_mse(a, b, loss_config.mse_uniform_ratio, loss_config.epsilon)
+                                        + gradient_weighted_mse(b, a, loss_config.mse_uniform_ratio, loss_config.epsilon),
+                          "distance": source_distance_loss(grid, b, distance_a, loss_config.epsilon)
+                                      + source_distance_loss(grid, a, distance_b, loss_config.epsilon)}
             else:
                 with precision_context():
                     result = model(a, b)
-                    breakdown = registration_loss(result, b, d, loss_config)
+                    breakdown = registration_loss(result, distance_a, distance_b, loss_config)
                 losses = {name: getattr(breakdown, name) for name in loss_names}
-                bounds = [max(previous, float(lipschitz_bound(u).max())) for previous, u in zip(bounds, result.displacements)]
+                velocity_max = max(velocity_max, float(torch.linalg.vector_norm(result.velocity, dim=1).max()))
+                for map_grid in (result.grid, result.reverse_grid):
+                    determinant = jacobian_determinant(map_grid)
+                    jacobian_min = min(jacobian_min, float(determinant.min()))
+                    folded += int((determinant <= 0).sum())
+                    cell_count += determinant.numel()
             for name in values:
                 values[name] += float(losses[name]) * len(chunk)
         values = {name: value / len(pairs) for name, value in values.items()}
@@ -213,7 +222,9 @@ def train(args):
             raise FloatingPointError("Nonfinite evaluated loss; inspect the last saved step")
         values["count"] = len(pairs)
         if not identity:
-            values["stage_lipschitz_max"] = bounds
+            values["velocity_max"] = velocity_max
+            values["jacobian_min"] = jacobian_min
+            values["folding_fraction"] = folded / cell_count
         return values
 
     baseline = evaluate(validation_pairs, identity=True)
@@ -230,7 +241,7 @@ def train(args):
             model.eval()
             best_validation = evaluate(validation_pairs)
             best_validation["evaluated_step"] = previous_best["step"]
-            best_validation["mse_vs_identity"] = best_validation["mse"] / max(baseline["mse"], loss_config.epsilon)
+            best_validation["similarity_vs_identity"] = best_validation["similarity"] / max(baseline["similarity"], loss_config.epsilon)
             best_total = best_validation["total"]
             previous_best.update(best_total=best_total, validation=best_validation,
                                  baseline=baseline, validation_pairs=validation_pairs,
@@ -244,19 +255,19 @@ def train(args):
         model.eval()
         latest_validation = evaluate(validation_pairs)
         latest_validation["evaluated_step"] = step
-        latest_validation["mse_vs_identity"] = latest_validation["mse"] / max(baseline["mse"], loss_config.epsilon)
+        latest_validation["similarity_vs_identity"] = latest_validation["similarity"] / max(baseline["similarity"], loss_config.epsilon)
         if append:
             append_metrics({"step": step, "split": "val", "epoch": sampler.epoch_progress,
                             "elapsed_seconds": time.monotonic() - started, **latest_validation})
-        print(f"step={step:7d} val={latest_validation['total']:.6f} mse={latest_validation['mse']:.6f} "
-              f"distance={latest_validation['distance']:.6f} def={latest_validation['deformation']:.6f} "
-              f"mse/baseline={latest_validation['mse_vs_identity']:.3f}", flush=True)
+        print(f"step={step:7d} val={latest_validation['total']:.6f} sim={latest_validation['similarity']:.6f} "
+              f"distance={latest_validation['distance']:.6f} smooth={latest_validation['smoothness']:.6f} "
+              f"sim/baseline={latest_validation['similarity_vs_identity']:.3f}", flush=True)
         if latest_validation["total"] < best_total:
             best_total = latest_validation["total"]
             save_checkpoint("best.pt")
         if preview:
             for position, i in enumerate(previews.tolist()):
-                a, b, _ = data.batch(validation_pairs[i:i+1], device)
+                a, b, _, _ = data.batch(validation_pairs[i:i+1], device, with_distance=False)
                 with precision_context():
                     result = model(a, b)
                 char = data.describe(validation_pairs[i])["character"]
@@ -271,7 +282,7 @@ def train(args):
         append_metrics({"step": step, "split": "train_batch", "epoch": sampler.epoch_progress,
                         "elapsed_seconds": time.monotonic() - started, "grad_norm_before_clip": grad_norm, **metrics})
         print(f"step={step:7d} epoch={sampler.epoch_progress:.3f} train={metrics['total']:.6f} "
-              f"mse={metrics['mse']:.6f} distance={metrics['distance']:.6f} def={metrics['deformation']:.6f} "
+              f"sim={metrics['similarity']:.6f} distance={metrics['distance']:.6f} smooth={metrics['smoothness']:.6f} "
               f"grad={grad_norm:.3f}", flush=True)
         model.train()
 
@@ -286,11 +297,11 @@ def train(args):
     try:
         while step < end_step and not stop_requested:
             pairs = sampler.next(training.batch_size)
-            a, b, d = data.batch(pairs, device)
+            a, b, distance_a, distance_b = data.batch(pairs, device)
             optimizer.zero_grad(set_to_none=True)
             with precision_context():
                 result = model(a, b)
-                loss = registration_loss(result, b, d, loss_config)
+                loss = registration_loss(result, distance_a, distance_b, loss_config)
             if not bool(torch.isfinite(loss.total)):
                 raise FloatingPointError(f"Nonfinite training loss at attempted step {step+1}")
             loss.total.backward()

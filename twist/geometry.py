@@ -1,12 +1,7 @@
-"""Fixed boundary projection, Lipschitz bounds, and backward sampling maps.
-
-Coordinates use [0, 1]^2 in (x, y) order. A grid maps an output location
-to the original source image, so composition appends small maps on the right.
-"""
+"""Stationary velocity exponentials and backward sampling on [0,1]^2."""
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 
 import torch
 from torch import Tensor
@@ -28,49 +23,22 @@ def identity_grid(batch: int, size: tuple[int, int], *, device: torch.device,
     return torch.stack((columns, rows), dim=-1).unsqueeze(0).expand(batch, -1, -1, -1)
 
 
-def lipschitz_bound(displacement: Tensor) -> Tensor:
-    """Per-image conservative bound for the entire bilinear control field.
-
-    Each Jacobian column is a convex combination of neighboring edge slopes.
-    The bound uses the Frobenius norm to bound the operator norm, including
-    all cells rather than only Jacobians sampled at a few pixel locations.
-    """
-    if displacement.ndim != 4 or displacement.shape[1] != 2:
-        raise ValueError("displacement must have shape [B, 2, Hc, Wc]")
-    height, width = displacement.shape[-2:]
-    if min(height, width) < 2:
-        raise ValueError("a control field needs at least two nodes per dimension")
-    field = displacement.to(dtype=geometry_dtype(displacement))
-    horizontal = (field[..., 1:] - field[..., :-1]) * (width - 1)
-    vertical = (field[..., 1:, :] - field[..., :-1, :]) * (height - 1)
-    a = torch.linalg.vector_norm(horizontal, dim=1).amax(dim=(-2, -1))
-    b = torch.linalg.vector_norm(vertical, dim=1).amax(dim=(-2, -1))
-    # vector_norm has a finite zero subgradient, unlike sqrt(a*a + b*b).
-    return torch.linalg.vector_norm(torch.stack((a, b), dim=-1), dim=-1)
-
-
-def constrain_displacement(raw: Tensor, limit: float, *, epsilon: float = 1e-6) -> Tensor:
-    """Fix the boundary first, then rescale to a strict sub-unit bound."""
-    if not math.isfinite(limit) or not 0 < limit < 1:
-        raise ValueError("limit must be strictly between zero and one")
-    if not math.isfinite(epsilon) or epsilon <= 0:
-        raise ValueError("epsilon must be finite and positive")
-    if raw.ndim != 4 or raw.shape[1] != 2 or min(raw.shape[-2:]) < 3:
-        raise ValueError("raw control field must have shape [B, 2, Hc>=3, Wc>=3]")
-    field = raw.to(dtype=geometry_dtype(raw))
-    # Rebuild the zero ring so boundary predictions cannot influence the bound.
-    field = F.pad(field[:, :, 1:-1, 1:-1], (1, 1, 1, 1))
-    bound = lipschitz_bound(field)
-    scale = (limit / (bound + epsilon)).clamp(max=1.0)
-    return field * scale[:, None, None, None]
+def zero_boundary(velocity: Tensor) -> Tensor:
+    """Fix only the boundary; preserve every interior velocity without clipping."""
+    if velocity.ndim != 4 or velocity.shape[1] != 2 or min(velocity.shape[-2:]) < 3:
+        raise ValueError("velocity must have shape [B,2,Hc>=3,Wc>=3]")
+    field = velocity.to(dtype=geometry_dtype(velocity))
+    return F.pad(field[:, :, 1:-1, 1:-1], (1, 1, 1, 1))
 
 
 def sample_displacement(displacement: Tensor, coordinates: Tensor) -> Tensor:
     """Evaluate a continuous bilinear field, with zero displacement outside."""
     if coordinates.ndim != 4 or coordinates.shape[-1] != 2:
         raise ValueError("coordinates must have shape [B, H, W, 2]")
-    if displacement.shape[0] != coordinates.shape[0]:
-        raise ValueError("field and coordinates must have the same batch size")
+    if displacement.ndim != 4 or displacement.shape[1] != 2:
+        raise ValueError("displacement must have shape [B,2,H,W]")
+    if displacement.shape[0] != coordinates.shape[0] or displacement.device != coordinates.device:
+        raise ValueError("field and coordinates must share batch size and device")
     field = displacement.to(dtype=coordinates.dtype)
     sampled = F.grid_sample(field, coordinates * 2 - 1, mode="bilinear",
                             padding_mode="zeros", align_corners=True)
@@ -87,40 +55,76 @@ def sample_image(images: Tensor, coordinates: Tensor) -> Tensor:
                          mode="bilinear", padding_mode="border", align_corners=True)
 
 
-def _time_scale(time: float | Tensor, coordinates: Tensor) -> Tensor:
-    batch = coordinates.shape[0]
+def time_scale(time: float | Tensor, reference: Tensor, *,
+               minimum: float = -1.0, maximum: float = 1.0) -> Tensor:
     if isinstance(time, (int, float)):
-        if not math.isfinite(time) or not 0 <= time <= 1:
-            raise ValueError("time must be finite and in [0, 1]")
-        times = coordinates.new_tensor(float(time))
+        if not math.isfinite(time) or not minimum <= time <= maximum:
+            raise ValueError(f"time must be finite and in [{minimum}, {maximum}]")
+        times = reference.new_tensor(float(time))
+    elif isinstance(time, Tensor):
+        times = time.to(device=reference.device, dtype=reference.dtype)
+        if not bool(torch.isfinite(times).all()) or bool(((times < minimum) | (times > maximum)).any()):
+            raise ValueError(f"time must be finite and in [{minimum}, {maximum}]")
     else:
-        times = time.to(device=coordinates.device, dtype=coordinates.dtype)
-        if not bool(torch.isfinite(times).all()) or bool(((times < 0) | (times > 1)).any()):
-            raise ValueError("time must be finite and in [0, 1]")
+        raise ValueError("time must be a scalar or a tensor with shape [B]")
     if times.ndim == 0:
         return times.reshape(1, 1, 1, 1)
-    if times.shape != (batch,):
+    if times.shape != (reference.shape[0],):
         raise ValueError("time must be a scalar or a tensor with shape [B]")
     return times[:, None, None, None]
 
 
-def compose_displacements(displacements: Sequence[Tensor], coordinates: Tensor,
-                          time: float | Tensor = 1.0) -> Tensor:
-    """Evaluate g1(g2(...gK(x))) using the original control fields.
+def scaling_and_squaring(velocity: Tensor, *, size: tuple[int, int] | None = None,
+                         time: float | Tensor = 1.0, squaring_steps: int = 7) -> Tensor:
+    """Approximate exp(time*v)-id as a dense displacement [B,2,H,W].
 
-    Evaluating each field at the updated coordinates preserves the actual
-    continuous composition. Re-interpolating a cached coarse cumulative map
-    would instead introduce a new approximation with no inherited bound.
+    Start with d=time*v/2**n, then square id+d via d <- d+d(id+d).
+    Time scales the velocity before integration, never the final displacement.
+    Negative time integrates the same stationary field in reverse.
     """
-    coordinates = coordinates.to(dtype=geometry_dtype(coordinates))
-    strength = _time_scale(time, coordinates)
-    for field in reversed(displacements):
-        coordinates = coordinates + strength * sample_displacement(field, coordinates)
-    return coordinates
+    if type(squaring_steps) is not int or squaring_steps < 0:
+        raise ValueError("squaring_steps must be a nonnegative integer")
+    field = zero_boundary(velocity)
+    coordinates = identity_grid(field.shape[0], size or field.shape[-2:],
+                                device=field.device, dtype=field.dtype)
+    strength = time_scale(time, coordinates)
+    displacement = sample_displacement(field, coordinates).permute(0, 3, 1, 2)
+    displacement = displacement * strength * (2.0 ** -squaring_steps)
+    for _ in range(squaring_steps):
+        shifted = coordinates + displacement.permute(0, 2, 3, 1)
+        displacement = displacement + sample_displacement(displacement, shifted).permute(0, 3, 1, 2)
+    return displacement
 
 
-def composed_grid(displacements: Sequence[Tensor], source: Tensor,
-                  time: float | Tensor = 1.0) -> Tensor:
-    coordinates = identity_grid(source.shape[0], source.shape[-2:], device=source.device,
-                                dtype=geometry_dtype(source))
-    return compose_displacements(displacements, coordinates, time)
+def velocity_grid(velocity: Tensor, reference: Tensor, time: float | Tensor = 1.0,
+                  *, squaring_steps: int = 7) -> Tensor:
+    """Backward sampling map exp(time*v) at the reference image resolution."""
+    if velocity.shape[0] != reference.shape[0] or velocity.device != reference.device:
+        raise ValueError("velocity and reference must share batch size and device")
+    displacement = scaling_and_squaring(velocity, size=reference.shape[-2:], time=time,
+                                         squaring_steps=squaring_steps)
+    coordinates = identity_grid(reference.shape[0], reference.shape[-2:], device=reference.device,
+                                dtype=displacement.dtype)
+    return coordinates + displacement.permute(0, 2, 3, 1)
+
+
+def compose_grids(outer: Tensor, inner: Tensor) -> Tensor:
+    """Return outer(inner(x)); interpolate displacement, not absolute coordinates."""
+    if outer.shape != inner.shape or outer.ndim != 4 or outer.shape[-1] != 2:
+        raise ValueError("grids must have equal shape [B,H,W,2]")
+    coordinates = identity_grid(outer.shape[0], outer.shape[1:3],
+                                device=outer.device, dtype=outer.dtype)
+    return inner + sample_displacement((outer - coordinates).permute(0, 3, 1, 2), inner)
+
+
+def jacobian_determinant(grid: Tensor) -> Tensor:
+    """Finite-difference determinant at cell centers, in normalized units."""
+    if grid.ndim != 4 or grid.shape[-1] != 2 or min(grid.shape[1:3]) < 2:
+        raise ValueError("grid must have shape [B,H>=2,W>=2,2]")
+    field = grid.to(dtype=geometry_dtype(grid))
+    height, width = field.shape[1:3]
+    dx = ((field[:, :-1, 1:] - field[:, :-1, :-1])
+          + (field[:, 1:, 1:] - field[:, 1:, :-1])) * ((width - 1) / 2)
+    dy = ((field[:, 1:, :-1] - field[:, :-1, :-1])
+          + (field[:, 1:, 1:] - field[:, :-1, 1:])) * ((height - 1) / 2)
+    return dx[..., 0] * dy[..., 1] - dx[..., 1] * dy[..., 0]

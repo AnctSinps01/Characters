@@ -1,13 +1,13 @@
 # 线条图变换实验
 
-本仓库保留两条独立路线：原有的手写字生成模型位于 [`DiT-flow/`](DiT-flow/README.md)；通用线条图连续几何变形模型位于 [`twist/`](twist/README.md)。`twist` 已实现串联配准、几何约束和三类 loss。
+本仓库保留两条独立路线：原有的手写字生成模型位于 [`DiT-flow/`](DiT-flow/README.md)；通用线条图连续几何变形模型位于 [`twist/`](twist/README.md)。`twist` 使用单个网络预测定常速度场，以 Scaling and Squaring 完成双向配准和插值。
 
 ## 目录
 
 | 路径 | 用途 |
 |---|---|
 | [`DiT-flow/`](DiT-flow/README.md) | 原 Glyph2Hand 的模型、配置、CASIA 数据处理、训练入口、测试和设计文档 |
-| [`twist/`](twist/README.md) | 通用线条图串联 Transformer 配准、几何约束与 loss |
+| [`twist/`](twist/README.md) | 通用线条图 Transformer 速度场配准、双向插值与 loss |
 | `fonts/` | 公共字体资源 |
 | [`One-DM/`](One-DM/README.md) | 保留原位置的参考项目 |
 | [`readme/`](readme/README.md) | 公共技术分析；原 DiT-flow 的 LaTeX 和 PDF 已移到 `DiT-flow/readme/` |
@@ -33,6 +33,6 @@ python -m unittest discover -s tests -v
 
 ## twist 的当前目标
 
-输入两张近似同构的线条图 A、B，通过固定边界、受 Lipschitz 约束的小残差采样变换串联，生成可查询任意 `t ∈ [0,1]` 的轨迹。三类 loss 为软平衡 MSE、原始 A 的距离场匹配与形变正则，不需要真实变形场或中间帧标签。任务不依赖汉字标签；单字实验见 [`twist/train-test-1/`](twist/train-test-1/README.md)，全数据集同字手写图配对训练见 [`twist/train-all-pair/`](twist/train-all-pair/README.md)。通用数据生成和外观分支尚未实现。
+输入两张近似同构的线条图 A、B，通过单个网络内堆叠 SA / CA / FFN 预测定常速度场，只保留边界置零。Scaling and Squaring 积分得到 A 走 t、B 反向走 1−t 的两张变形图，再以 (1−t)、t 加权生成轨迹。损失固定为双向图像相似度、双向距离场 Chamfer 和温和的速度梯度平滑，不需要真实变形场或中间帧标签。任务不依赖汉字标签；全数据集同字手写图配对训练见 [`twist/train-all-pair/`](twist/train-all-pair/README.md)。
 
 完整规划见 [`twist/DESIGN.md`](twist/DESIGN.md)。

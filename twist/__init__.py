@@ -1,4 +1,4 @@
-"""Transformer registration with constrained backward sampling maps."""
+"""Transformer stationary-velocity registration and bidirectional morphing."""
 from .config import LossConfig, ModelConfig
 from .distance import distance_fields
 from .losses import LossBreakdown, registration_loss

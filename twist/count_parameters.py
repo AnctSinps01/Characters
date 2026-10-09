@@ -21,12 +21,10 @@ def main() -> None:
             parser.add_argument(name, type=type(default), default=default)
     config = ModelConfig(**vars(parser.parse_args()))
     model = Twist(config)
-    per_stage = sum(parameter.numel() for parameter in model.stages[0].parameters())
     total = sum(parameter.numel() for parameter in model.parameters())
     trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
     print(json.dumps(asdict(config), ensure_ascii=False, indent=2))
-    print(f"One stage: {per_stage:,} ({per_stage / 1e6:.3f}M)")
-    print(f"Unique parameter sets: {len(model.stages)}; executed stages: {config.num_stages}")
+    print(f"Single velocity network: {config.num_blocks} attention blocks")
     print(f"Total: {total:,} ({total / 1e6:.3f}M)")
     print(f"Trainable: {trainable:,}")
 

@@ -6,13 +6,13 @@ import unittest
 import torch
 
 from twist import ModelConfig, RegistrationStage, Twist, distance_fields, registration_loss
-from twist.geometry import composed_grid, lipschitz_bound, sample_image
+from twist.geometry import sample_image, velocity_grid
 from twist.layers import DualStreamBlock
 
 
 def tiny_config(**overrides) -> ModelConfig:
     return replace(ModelConfig(image_size=16, patch_size=4, token_dim=32, num_heads=4,
-                               blocks_per_stage=1, num_stages=2), **overrides)
+                               num_blocks=2, squaring_steps=5), **overrides)
 
 
 def images() -> tuple[torch.Tensor, torch.Tensor]:
@@ -51,94 +51,121 @@ class ModelTests(unittest.TestCase):
         torch.testing.assert_close(updated_a, a)
         self.assertFalse(torch.equal(updated_b, b))
 
-    def test_standalone_stage_outputs_constrained_two_component_grid(self) -> None:
+    def test_network_outputs_one_unclipped_velocity_with_zero_boundary(self):
         config = tiny_config()
-        field = RegistrationStage(config)(*images())
+        stage = RegistrationStage(config)
+        with torch.no_grad():
+            stage.velocity_head.weight.zero_()
+            stage.velocity_head.bias.fill_(3.0)
+        field = stage(*images())
         self.assertEqual(field.shape, (2, 2, config.control_grid_size, config.control_grid_size))
-        self.assertTrue(bool((lipschitz_bound(field) <= config.lipschitz_limit).all()))
+        torch.testing.assert_close(field[:, :, 1:-1, 1:-1], torch.full_like(field[:, :, 1:-1, 1:-1], 3.0))
+        for edge in (field[:, :, 0], field[:, :, -1], field[:, :, :, 0], field[:, :, :, -1]):
+            self.assertEqual(int(torch.count_nonzero(edge)), 0)
 
-    def test_each_stage_sees_accumulated_warp_and_original_B(self) -> None:
-        model = Twist(tiny_config(num_stages=3))
+    def test_single_network_embeds_A_B_once_and_decodes_after_all_blocks(self):
+        model = Twist(tiny_config(num_blocks=3))
         source, target = images()
-        captured = []
-        hooks = [stage.register_forward_pre_hook(
-            lambda module, args: captured.append((args[0], args[1]))) for stage in model.stages]
+        embeddings, decoded, crossed = [], [], []
+        hooks = [model.network.patch_embedding.register_forward_pre_hook(
+                    lambda module, args: embeddings.append(args[0])),
+                 model.network.velocity_head.register_forward_hook(
+                    lambda module, args, output: decoded.append(output))]
+        hooks += [block.cross_attention.register_forward_hook(
+                    lambda module, args, output: crossed.append(output)) for block in model.network.blocks]
         try:
             result = model(source, target)
         finally:
             for hook in hooks:
                 hook.remove()
-        self.assertIs(captured[0][0], source)
-        for index in range(1, 3):
-            torch.testing.assert_close(captured[index][0], result.stage_images[index - 1])
-            self.assertGreater((captured[index][0] - source).abs().max().item(), 1e-5)
-        self.assertTrue(all(item[1] is target for item in captured))
-        torch.testing.assert_close(result.image, sample_image(source, composed_grid(result.displacements, source)))
-        # Resampling an already interpolated previous image would blur differently.
-        recursive = sample_image(result.stage_images[-2], composed_grid([result.displacements[-1]], source))
-        self.assertGreater((recursive - result.image).abs().max().item(), 1e-5)
+        self.assertEqual(len(embeddings), 2)
+        self.assertIs(embeddings[0], source)
+        self.assertIs(embeddings[1], target)
+        self.assertEqual(len(decoded), 1)
+        self.assertEqual(len(crossed), 3)
+        torch.testing.assert_close(result.image, sample_image(source, result.grid))
+        torch.testing.assert_close(result.reverse_image, sample_image(target, result.reverse_grid))
+        torch.testing.assert_close(result.grid, velocity_grid(result.velocity, source, squaring_steps=5))
 
-    def test_loss_reaches_every_parameter_and_stage_without_nonfinite_gradients(self) -> None:
+    def test_bidirectional_loss_reaches_every_block_and_parameter(self):
         model = Twist(tiny_config())
         source, target = images()
-        losses = registration_loss(model(source, target), target, distance_fields(source))
+        result = model(source, target)
+        losses = registration_loss(result, distance_fields(source), distance_fields(target))
+        reverse_gradient = torch.autograd.grad(losses.reverse_similarity, result.velocity, retain_graph=True)[0]
+        self.assertGreater(float(reverse_gradient.abs().sum()), 0)
         losses.total.backward()
         for name, parameter in model.named_parameters():
             self.assertIsNotNone(parameter.grad, name)
             self.assertTrue(bool(torch.isfinite(parameter.grad).all()), name)
-        for stage in model.stages:
-            self.assertGreater(stage.displacement_head.weight.grad.abs().sum().item(), 0)
-            self.assertGreater(stage.blocks[0].cross_attention.in_proj_weight.grad.abs().sum().item(), 0)
+        for block in model.network.blocks:
+            self.assertGreater(float(block.cross_attention.in_proj_weight.grad.abs().sum()), 0)
+        self.assertGreater(float(model.network.velocity_head.weight.grad.abs().sum()), 0)
 
-    def test_cached_trajectory_queries_do_not_rerun_neural_stages(self) -> None:
+    def test_cached_render_has_exact_endpoints_and_the_bidirectional_weighted_middle(self):
         model = Twist(tiny_config()).eval()
         source, target = images()
         result = model(source, target)
-        hooks = [stage.register_forward_pre_hook(
-            lambda module, args: self.fail("render must not rerun a neural stage")) for stage in model.stages]
+        hook = model.network.register_forward_pre_hook(
+            lambda module, args: self.fail("render must not rerun the network"))
         try:
-            torch.testing.assert_close(result.render(0).image, source, rtol=0, atol=1e-6)
-            torch.testing.assert_close(result.render(1).image, result.image)
-            first = result.render(0.37)
-            result.render(0.8)
-            torch.testing.assert_close(first.image, result.render(0.37).image, rtol=0, atol=0)
-            self.assertGreater((first.image - source).abs().max().item(), 1e-5)
+            torch.testing.assert_close(result.render(0).image, source, rtol=0, atol=0)
+            torch.testing.assert_close(result.render(1).image, target, rtol=0, atol=0)
+            torch.testing.assert_close(result.render(1).source_image, result.image)
+            torch.testing.assert_close(result.render(0).target_image, result.reverse_image)
+            middle = result.render(0.37)
+            expected_a = sample_image(source, velocity_grid(result.velocity, source, 0.37, squaring_steps=5))
+            expected_b = sample_image(target, velocity_grid(result.velocity, target, -0.63, squaring_steps=5))
+            torch.testing.assert_close(middle.image, 0.63 * expected_a + 0.37 * expected_b)
+            torch.testing.assert_close(middle.image, result.render(0.37).image, rtol=0, atol=0)
         finally:
-            for hook in hooks:
-                hook.remove()
+            hook.remove()
 
-    def test_shared_stages_reuse_weights_and_independent_stages_scale_count(self) -> None:
-        count = lambda model: sum(parameter.numel() for parameter in model.parameters())
-        one = Twist(tiny_config(num_stages=1))
-        independent = Twist(tiny_config(num_stages=3))
-        shared = Twist(tiny_config(num_stages=3, share_stage_weights=True))
-        self.assertEqual(count(independent), 3 * count(one))
-        self.assertEqual(count(shared), count(one))
-        self.assertEqual(len(shared(*images()).displacements), 3)
-
-    def test_cpu_autocast_keeps_sampling_fields_and_losses_float32(self) -> None:
+    def test_batched_render_times_and_reverse_symmetry(self):
         model = Twist(tiny_config())
         source, target = images()
-        # Some CPUs run oneDNN BF16 forward but cannot run its BF16 backward.
-        # Use PyTorch's native CPU kernels to test the model's AMP behavior.
+        result = model(source, target)
+        times = torch.tensor([0.2, 0.8])
+        batch = result.render(times)
+        for index, time in enumerate(times):
+            single = replace(result, source=source[index:index+1], target=target[index:index+1],
+                             velocity=result.velocity[index:index+1], grid=result.grid[index:index+1])
+            torch.testing.assert_close(batch.image[index:index+1], single.render(time).image)
+        reversed_result = replace(result, source=target, target=source, velocity=-result.velocity)
+        torch.testing.assert_close(batch.image, reversed_result.render(1 - times).image, atol=2e-6, rtol=1e-5)
+
+    def test_block_depth_controls_parameter_count(self):
+        count = lambda model: sum(parameter.numel() for parameter in model.parameters())
+        one = Twist(tiny_config(num_blocks=1))
+        three = Twist(tiny_config(num_blocks=3))
+        block_count = sum(parameter.numel() for parameter in DualStreamBlock(tiny_config()).parameters())
+        self.assertEqual(count(three) - count(one), 2 * block_count)
+
+    def test_cpu_autocast_keeps_velocity_sampling_and_losses_float32(self):
+        model = Twist(tiny_config())
+        source, target = images()
         with torch.backends.mkldnn.flags(enabled=False):
             with torch.autocast("cpu", dtype=torch.bfloat16):
                 result = model(source, target)
-                losses = registration_loss(result, target, distance_fields(source))
-            self.assertEqual(result.grid.dtype, torch.float32)
-            self.assertEqual(result.image.dtype, torch.float32)
-            self.assertEqual(result.displacements[0].dtype, torch.float32)
+                losses = registration_loss(result, distance_fields(source), distance_fields(target))
+            for tensor in (result.velocity, result.grid, result.image, result.reverse_grid,
+                           result.reverse_image, result.render(0.5).image, losses.total):
+                self.assertEqual(tensor.dtype, torch.float32)
             losses.total.backward()
         self.assertTrue(all(bool(torch.isfinite(p.grad).all()) for p in model.parameters()))
 
-    def test_invalid_config_and_input_shapes_are_rejected(self) -> None:
-        for change in ({"lipschitz_limit": 1.0}, {"image_size": 15}, {"token_dim": 30},
-                       {"num_stages": 0}, {"blocks_per_stage": 0}):
+    def test_invalid_config_inputs_and_render_times(self):
+        for change in ({"squaring_steps": -1}, {"squaring_steps": True}, {"image_size": 15},
+                       {"token_dim": 30}, {"num_blocks": 0}):
             with self.assertRaises(ValueError):
                 tiny_config(**change)
         source, target = images()
         with self.assertRaises(ValueError):
             Twist(tiny_config())(source, target[:, :, :, :-1])
+        result = Twist(tiny_config())(source, target)
+        for time in (-0.01, 1.01, float("nan"), torch.zeros(2, 1)):
+            with self.assertRaises(ValueError):
+                result.render(time)
 
 
 if __name__ == "__main__":

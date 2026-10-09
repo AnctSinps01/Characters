@@ -5,7 +5,7 @@ import math
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    steps: int = 100_000          # 累计优化器更新次数，--stop-after 可先跑短实验。
+    steps: int = 1000_000         # 累计优化器更新次数，--stop-after 可先跑短实验。
     batch_size: int = 32
     learning_rate: float = 1e-4
     gradient_clip: float = 1.0

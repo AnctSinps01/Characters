@@ -4,82 +4,126 @@ import unittest
 
 import torch
 
-from twist.geometry import (compose_displacements, constrain_displacement,
-                            identity_grid, lipschitz_bound, sample_displacement,
-                            sample_image)
+from twist.geometry import (compose_grids, identity_grid, jacobian_determinant,
+                            sample_displacement, sample_image, scaling_and_squaring,
+                            velocity_grid, zero_boundary)
+
+
+def logistic_velocity(batch=1, size=65, rate=0.8):
+    nodes = identity_grid(batch, (size, size), device=torch.device("cpu"), dtype=torch.float64)
+    x, y = nodes[..., 0], nodes[..., 1]
+    return zero_boundary(torch.stack((rate * x * (1 - x) * torch.sin(torch.pi * y),
+                                      torch.zeros_like(x)), dim=1))
+
+
+def logistic_flow(time, size=65, rate=0.8):
+    nodes = identity_grid(1, (size, size), device=torch.device("cpu"), dtype=torch.float64).clone()
+    x, y = nodes[..., 0].clone(), nodes[..., 1]
+    factor = torch.exp(rate * torch.sin(torch.pi * y) * time)
+    nodes[..., 0] = x * factor / (1 - x + x * factor)
+    return nodes
 
 
 class GeometryTests(unittest.TestCase):
-    def setUp(self) -> None:
-        torch.manual_seed(12)
+    def setUp(self):
         torch.set_num_threads(1)
 
-    def test_boundary_projection_and_entire_bilinear_field_bound(self) -> None:
-        raw = torch.randn(3, 2, 7, 9, requires_grad=True)
-        field = constrain_displacement(raw, 0.75)
+    def test_boundary_projection_preserves_unrestricted_interior_and_gradients(self):
+        raw = torch.full((2, 2, 7, 9), 3.0, requires_grad=True)
+        field = zero_boundary(raw)
+        torch.testing.assert_close(field[:, :, 1:-1, 1:-1], raw[:, :, 1:-1, 1:-1], rtol=0, atol=0)
         for edge in (field[:, :, 0], field[:, :, -1], field[:, :, :, 0], field[:, :, :, -1]):
-            self.assertEqual(torch.count_nonzero(edge).item(), 0)
-        self.assertTrue(bool((lipschitz_bound(field) <= 0.75).all()))
+            self.assertEqual(int(torch.count_nonzero(edge)), 0)
+        field.sum().backward()
+        torch.testing.assert_close(raw.grad[:, :, 1:-1, 1:-1], torch.ones_like(raw.grad[:, :, 1:-1, 1:-1]))
+        self.assertEqual(int(torch.count_nonzero(raw.grad[:, :, 0])), 0)
 
-        # Check the continuous interpolant, including points inside control cells.
-        points = torch.rand(3, 8, 11, 2)
-        other = torch.rand_like(points)
-        mapped = points + sample_displacement(field, points)
-        mapped_other = other + sample_displacement(field, other)
-        separation = torch.linalg.vector_norm(mapped - mapped_other, dim=-1)
-        initial = torch.linalg.vector_norm(points - other, dim=-1)
-        self.assertTrue(bool((separation + 1e-6 >= 0.25 * initial).all()))
-        self.assertTrue(bool(((mapped >= -1e-6) & (mapped <= 1 + 1e-6)).all()))
-        field.square().sum().backward()
-        self.assertTrue(bool(torch.isfinite(raw.grad).all()))
+    def test_squaring_exponent_controls_initial_step_and_self_composition(self):
+        field = logistic_velocity(size=17)
+        identity = identity_grid(1, (17, 17), device=field.device, dtype=field.dtype)
+        initial = sample_displacement(field, identity)
+        torch.testing.assert_close(scaling_and_squaring(field, time=0.6, squaring_steps=0),
+                                   (0.6 * initial).permute(0, 3, 1, 2))
+        small_map = identity + 0.3 * initial
+        expected = compose_grids(small_map, small_map) - identity
+        torch.testing.assert_close(scaling_and_squaring(field, time=0.6, squaring_steps=1),
+                                   expected.permute(0, 3, 1, 2))
 
-    def test_zero_displacement_has_finite_backward(self) -> None:
-        raw = torch.zeros(1, 2, 5, 5, requires_grad=True)
-        constrained = constrain_displacement(raw, 0.8)
-        constrained.sum().backward()
-        self.assertTrue(bool(torch.isfinite(raw.grad).all()))
-        self.assertEqual(torch.count_nonzero(constrained).item(), 0)
+    def test_exponential_matches_analytic_nonlinear_flow_and_converges(self):
+        velocity = logistic_velocity()
+        reference = torch.zeros(1, 1, 65, 65, dtype=torch.float64)
+        expected = logistic_flow(1)
+        errors = [(velocity_grid(velocity, reference, squaring_steps=n) - expected).abs().max().item()
+                  for n in (0, 4, 8)]
+        self.assertGreater(errors[0], 10 * errors[1])
+        self.assertGreater(errors[1], errors[2])
+        self.assertLess(errors[2], 3e-4)
 
-    def test_backward_composition_is_ordered_and_not_displacement_addition(self) -> None:
-        fields = [constrain_displacement(torch.randn(1, 2, 6, 6), 0.6) for _ in range(2)]
-        coordinates = identity_grid(1, (13, 17), device=torch.device("cpu"))
-        inner = coordinates + sample_displacement(fields[1], coordinates)
-        expected = inner + sample_displacement(fields[0], inner)
-        actual = compose_displacements(fields, coordinates)
-        torch.testing.assert_close(actual, expected)
-        added = coordinates + sum(sample_displacement(field, coordinates) for field in fields)
-        self.assertGreater((actual - added).abs().max().item(), 1e-4)
+    def test_time_scales_velocity_instead_of_final_displacement(self):
+        velocity = logistic_velocity()
+        reference = torch.zeros(1, 1, 65, 65, dtype=torch.float64)
+        identity = identity_grid(1, (65, 65), device=reference.device, dtype=reference.dtype)
+        half = velocity_grid(velocity, reference, 0.5, squaring_steps=8)
+        endpoint = velocity_grid(velocity, reference, squaring_steps=8)
+        torch.testing.assert_close(half, logistic_flow(0.5), rtol=0, atol=3e-4)
+        self.assertGreater(float((half - (identity + 0.5 * (endpoint - identity))).abs().max()), 1e-3)
 
-    def test_time_zero_and_fixed_boundary_through_multiple_maps(self) -> None:
-        fields = [constrain_displacement(torch.randn(2, 2, 6, 6), 0.7) for _ in range(3)]
-        identity = identity_grid(2, (15, 19), device=torch.device("cpu"))
-        torch.testing.assert_close(compose_displacements(fields, identity, 0), identity)
-        grid = compose_displacements(fields, identity, torch.tensor([0.25, 0.9]))
-        for actual, expected in ((grid[:, 0], identity[:, 0]), (grid[:, -1], identity[:, -1]),
-                                 (grid[:, :, 0], identity[:, :, 0]), (grid[:, :, -1], identity[:, :, -1])):
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    def test_inverse_and_group_composition_are_accurate_with_discretization(self):
+        velocity = logistic_velocity()
+        reference = torch.zeros(1, 1, 65, 65, dtype=torch.float64)
+        identity = identity_grid(1, (65, 65), device=reference.device, dtype=reference.dtype)
+        forward = velocity_grid(velocity, reference, squaring_steps=9)
+        reverse = velocity_grid(velocity, reference, -1, squaring_steps=9)
+        torch.testing.assert_close(compose_grids(forward, reverse), identity, rtol=0, atol=4e-4)
+        first = velocity_grid(velocity, reference, 0.35, squaring_steps=8)
+        second = velocity_grid(velocity, reference, 0.25, squaring_steps=8)
+        whole = velocity_grid(velocity, reference, 0.6, squaring_steps=8)
+        torch.testing.assert_close(compose_grids(first, second), whole, rtol=0, atol=3e-4)
+        self.assertGreater(float(jacobian_determinant(forward).min()), 0)
 
-    def test_local_compression_of_sampling_grid_can_thicken_a_stroke(self) -> None:
-        nodes = identity_grid(1, (17, 17), device=torch.device("cpu"))
-        x, y = nodes[..., 0], nodes[..., 1]
-        window = 16 * x * (1 - x) * y * (1 - y)
-        raw = torch.stack((-0.3 * (x - 0.5) * window, torch.zeros_like(x)), dim=1)
-        field = constrain_displacement(raw, 0.8)
+    def test_batched_signed_times_and_fixed_boundary(self):
+        velocity = logistic_velocity(batch=2, size=33)
+        reference = torch.zeros(2, 1, 33, 33, dtype=torch.float64)
+        times = torch.tensor([0.25, -0.9], dtype=torch.float64)
+        actual = velocity_grid(velocity, reference, times)
+        for index, time in enumerate(times):
+            torch.testing.assert_close(actual[index:index+1],
+                                       velocity_grid(velocity[index:index+1], reference[index:index+1], time))
+        identity = identity_grid(2, (33, 33), device=reference.device, dtype=reference.dtype)
+        torch.testing.assert_close(velocity_grid(velocity, reference, 0), identity, rtol=0, atol=0)
+        for edge in (0, -1):
+            torch.testing.assert_close(actual[:, edge], identity[:, edge], rtol=0, atol=0)
+            torch.testing.assert_close(actual[:, :, edge], identity[:, :, edge], rtol=0, atol=0)
+
+    def test_zero_velocity_and_time_have_finite_backward(self):
+        velocity = torch.zeros(1, 2, 5, 5, requires_grad=True)
+        displacement = scaling_and_squaring(velocity, time=0.4)
+        displacement.sum().backward()
+        self.assertTrue(bool(torch.isfinite(velocity.grad).all()))
+        self.assertEqual(int(torch.count_nonzero(displacement)), 0)
+
+    def test_compression_can_thicken_strokes(self):
+        velocity = -logistic_velocity(rate=0.8).float()
         source = torch.ones(1, 1, 65, 65)
         source[:, :, 12:53, 30:35] = -1
-        coordinates = identity_grid(1, (65, 65), device=torch.device("cpu"))
-        warped = sample_image(source, compose_displacements([field], coordinates))
-        original_width = ((1 - source[0, 0, 32]) / 2).sum()
-        new_width = ((1 - warped[0, 0, 32]) / 2).sum()
-        self.assertGreater(new_width.item(), original_width.item() * 1.1)
+        # Centered contraction, zero on every boundary.
+        nodes = identity_grid(1, (65, 65), device=source.device)
+        x, y = nodes[..., 0], nodes[..., 1]
+        velocity[:, 0] = -0.8 * (x - 0.5) * 16 * x * (1-x) * y * (1-y)
+        warped = sample_image(source, velocity_grid(zero_boundary(velocity), source))
+        self.assertGreater(float(((1 - warped[0, 0, 32]) / 2).sum()),
+                           1.1 * float(((1 - source[0, 0, 32]) / 2).sum()))
 
-    def test_invalid_time_and_control_shapes_are_rejected(self) -> None:
-        coordinates = identity_grid(2, (5, 5), device=torch.device("cpu"))
-        for time in (-0.01, 1.1, float("nan"), torch.ones(2, 1)):
+    def test_invalid_times_shapes_and_squaring_exponents(self):
+        field = logistic_velocity(batch=2, size=5)
+        for time in (-1.01, 1.1, float("nan"), torch.ones(2, 1)):
             with self.assertRaises(ValueError):
-                compose_displacements([], coordinates, time)
+                scaling_and_squaring(field, time=time)
+        for exponent in (-1, 1.5, True):
+            with self.assertRaises(ValueError):
+                scaling_and_squaring(field, squaring_steps=exponent)
         with self.assertRaises(ValueError):
-            constrain_displacement(torch.zeros(1, 2, 2, 2), 0.8)
+            zero_boundary(torch.zeros(1, 2, 2, 2))
 
 
 if __name__ == "__main__":

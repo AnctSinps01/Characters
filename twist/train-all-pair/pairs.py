@@ -184,31 +184,38 @@ class PreparedPairs:
         images = self.pixels[indices.to(self.storage_device)].to(device=device).unsqueeze(1)
         return normalize_minmax(self.resize(images))
 
-    def batch(self, pairs, device):
+    def batch(self, pairs, device, *, with_distance=True):
         pairs = torch.as_tensor(pairs, dtype=torch.long, device="cpu")
         source = self.normalized(pairs[:, 0], device)
         target = self.normalized(pairs[:, 1], device)
-        # 只为缺失的源图准备距离场，重复来源去重；缓存始终在 CPU，避免占用训练显存。
+        if not with_distance:
+            return source, target, None, None
+        # A/B 共用按原图索引组织的 CPU LRU；跨角色和重复配对都只准备一次。
+        image_ids = torch.cat((pairs[:, 0], pairs[:, 1])).tolist()
+        images = torch.cat((source, target))
         values, missing, positions = {}, [], []
-        for position, source_id in enumerate(pairs[:, 0].tolist()):
-            if source_id in values:
+        seen = set()
+        for position, image_id in enumerate(image_ids):
+            if image_id in seen:
                 continue
-            if source_id in self.distance_cache:
-                values[source_id] = self.distance_cache[source_id]
-                self.distance_cache.move_to_end(source_id)
-            elif source_id not in missing:
-                missing.append(source_id)
+            seen.add(image_id)
+            if image_id in self.distance_cache:
+                values[image_id] = self.distance_cache[image_id]
+                self.distance_cache.move_to_end(image_id)
+            else:
+                missing.append(image_id)
                 positions.append(position)
         if missing:
-            fields = distance_fields(source[positions].detach().cpu(), threshold=self.threshold)
-            for source_id, field in zip(missing, fields):
-                field = field.clone()  # 不保留整个 batch 的底层存储，缓存上限对应实际像素存储。
-                values[source_id] = field
-                self.distance_cache[source_id] = field
+            fields = distance_fields(images[positions].detach().cpu(), threshold=self.threshold)
+            for image_id, field in zip(missing, fields):
+                field = field.clone()  # 每项拥有独立存储，使缓存上限对应实际占用。
+                values[image_id] = field
+                self.distance_cache[image_id] = field
                 if len(self.distance_cache) > self.cache_size:
                     self.distance_cache.popitem(last=False)
-        distance = torch.stack([values[source_id] for source_id in pairs[:, 0].tolist()]).to(device)
-        return source, target, distance
+        distance = torch.stack([values[image_id] for image_id in image_ids]).to(device)
+        count = len(pairs)
+        return source, target, distance[:count], distance[count:]
 
     def describe(self, pair):
         source, target = map(int, pair)

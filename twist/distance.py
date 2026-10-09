@@ -15,7 +15,7 @@ def distance_fields(images: Tensor, threshold: float = 0.0) -> Tensor:
 
     White is +1 and black is -1. Preparation is deliberately detached: only
     sampling coordinates, not the distance-transform algorithm, need gradients.
-    Compute once per original image and reuse across steps and stages.
+    Compute once per original A or B and reuse across steps and pairing roles.
     """
     from scipy.ndimage import distance_transform_edt
 
