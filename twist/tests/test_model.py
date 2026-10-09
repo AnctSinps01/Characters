@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from twist import ModelConfig, RegistrationStage, Twist, distance_fields, registration_loss
-from twist.geometry import sample_image, velocity_grid
+from twist.geometry import jacobian_determinant, sample_image, velocity_grid
 from twist.layers import DualStreamBlock
 
 
@@ -78,6 +79,20 @@ class ModelTests(unittest.TestCase):
             hook.remove()
         self.assertEqual(decoded[0].shape, (1, 64, 128))
         self.assertEqual(field.shape, (1, 2, 64, 64))
+
+    def test_default_pixel_head_starts_near_identity_on_shifted_strokes(self):
+        source = torch.ones(1, 1, 64, 64)
+        source[:, :, 10:54, 27:32] = -1
+        source[:, :, 28:33, 12:52] = -1
+        target = torch.roll(source, 8, dims=3)
+        with torch.no_grad():
+            for seed in (0, 8, 42):
+                torch.manual_seed(seed)
+                result = Twist()(source, target)
+                rms_pixels = float(result.velocity.square().mean().sqrt()) * 63
+                self.assertLess(rms_pixels, 0.25)
+                for grid in (result.grid, result.reverse_grid):
+                    self.assertGreater(float(jacobian_determinant(grid).min()), 0)
 
     def test_patch_vectors_land_on_their_own_pixels_and_xy_components(self):
         config = tiny_config(num_blocks=1)
@@ -189,6 +204,33 @@ class ModelTests(unittest.TestCase):
             torch.testing.assert_close(batch.image[index:index+1], single.render(time).image)
         reversed_result = replace(result, source=target, target=source, velocity=-result.velocity)
         torch.testing.assert_close(batch.image, reversed_result.render(1 - times).image, atol=2e-6, rtol=1e-5)
+
+    def test_scalar_endpoint_render_reuses_cached_maps_and_preserves_gradients(self):
+        source, target = images()
+        result = Twist(tiny_config())(source, target)
+        result.velocity.retain_grad()
+        with patch("twist.model.velocity_grid", side_effect=AssertionError("endpoint reintegration")), \
+                patch("twist.model.sample_image", side_effect=AssertionError("endpoint resampling")):
+            start, end = result.render(0), result.render(1)
+        self.assertIs(start.reverse_grid, result.reverse_grid)
+        self.assertIs(start.target_image, result.reverse_image)
+        self.assertIs(end.grid, result.grid)
+        self.assertIs(end.source_image, result.image)
+        (start.target_image.square().mean() + end.source_image.square().mean()).backward()
+        self.assertGreater(float(result.velocity.grad.abs().sum()), 0)
+
+    def test_scalar_preview_times_stay_scalars_and_tensor_times_keep_time_gradients(self):
+        source, target = images()
+        result = Twist(tiny_config())(source, target)
+        with patch("twist.model.velocity_grid", wraps=velocity_grid) as integrate:
+            result.render(0.37)
+        self.assertEqual(integrate.call_count, 2)
+        self.assertEqual(integrate.call_args_list[0].args[2], 0.37)
+        self.assertEqual(integrate.call_args_list[1].args[2], -0.63)
+        time = torch.tensor(0.37, requires_grad=True)
+        result.render(time).image.square().mean().backward()
+        self.assertTrue(bool(torch.isfinite(time.grad)))
+        self.assertGreater(float(time.grad.abs()), 0)
 
     def test_block_depth_controls_parameter_count(self):
         count = lambda model: sum(parameter.numel() for parameter in model.parameters())

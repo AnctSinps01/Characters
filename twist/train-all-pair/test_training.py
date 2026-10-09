@@ -225,6 +225,31 @@ class PairTrainingTests(unittest.TestCase):
             self.assertIsNone(no_a)
             self.assertIsNone(no_b)
 
+    def test_batch_prepares_unique_images_on_cpu_before_non_cpu_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture(root)
+            data = prepared(root, cache_size=2)
+            pair = data.match(data.records["train"][:1], torch.Generator().manual_seed(12))
+            pairs = torch.cat((pair, pair.flip(1), pair))
+            # A meta destination checks transfer ordering without requiring CUDA.
+            with patch.object(data, "normalized", wraps=data.normalized) as normalize, \
+                    patch("pairs.distance_fields", wraps=distance_fields) as transform:
+                a, b, distance_a, distance_b = data.batch(pairs, "meta")
+            self.assertEqual(normalize.call_count, 1)
+            self.assertEqual(normalize.call_args.args[0].numel(), 2)
+            self.assertEqual(normalize.call_args.args[1], torch.device("cpu"))
+            self.assertEqual(transform.call_args.args[0].device.type, "cpu")
+            self.assertTrue(all(value.device.type == "meta" for value in (a, b, distance_a, distance_b)))
+            stats = data.distance_cache_stats()
+            self.assertEqual((stats["hits"], stats["misses"]), (0, 2))
+            data.batch(pairs, "cpu")
+            stats = data.distance_cache_stats()
+            self.assertEqual((stats["hits"], stats["misses"]), (2, 2))
+            self.assertEqual(stats["hit_fraction"], 0.5)
+            data.batch(pairs, "cpu", with_distance=False)
+            self.assertEqual(stats, data.distance_cache_stats())
+
     def run_training(self, arguments):
         with patch.object(sys, "argv", ["train.py", *map(str, arguments)]), redirect_stdout(io.StringIO()):
             train(parse_args())

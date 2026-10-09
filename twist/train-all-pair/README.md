@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt
 python twist/train-all-pair/train.py --device cuda --output runs/twist-svf-pixels
 ```
 
-默认从零训练到累计 100,000 步。数据路径默认由脚本所在仓库确定，其他位置用 `--data /实际路径/data/prepared`。上面的输出目录为 `runs/twist-svf-pixels/`。
+默认从零训练到累计 1,000,000 步。数据路径默认由脚本所在仓库确定，其他位置用 `--data /实际路径/data/prepared`。上面的输出目录为 `runs/twist-svf-pixels/`。
 
 继续训练：
 
@@ -35,9 +35,10 @@ python twist/train-all-pair/train.py --device cuda --steps 10000 --output runs/t
 
 - 单个网络内默认堆叠 8 个 SA / CA / FFN 双流块，深度由 `num_blocks` 控制。每个 token 直接预测对应 patch 所有像素的二维速度；默认 256→128 解码 64 个二维向量，拼成 `[B,2,64,64]`。`squaring_steps=7` 先将速度缩放为 1/128，再自复合 7 次；命令行参数为 `--num-blocks`、`--squaring-steps`。
 - 默认 batch=32、lr=1e-4；`precision=auto` 在支持的 CUDA 显卡上使用 BF16，其余使用 FP32。几何采样和 loss 保持 FP32。
-- 全部原始字图以 uint8 缓存；`preload_to_gpu=True` 可让它们常驻训练显卡，需显存足够。
+- 全部原始字图以 uint8 缓存。默认在 CPU 对批内唯一图完成缩放、归一化和距离场准备，再传入训练设备，避免图像在 GPU/CPU 间往返；`preload_to_gpu=True` 可让它们常驻显卡，但 SciPy 距离场缓存未命中时仍需下载图像，是否更快需实际测量。
 - writer 加载日志分别打印累计 `read`（读文件）、`copy`（复制像素）、`metadata`（标签与书写者索引）时间；全部加载后单独打印同字配对索引耗时。这些时间也保存到 `run.json` 的 `data_loading_seconds`。CPU 像素复制采用 NumPy 直接写入 Tensor 的共享存储。
-- 固定使用双向图像相似度、双向距离场和速度平滑三项 loss。原始 A、B 的距离场按需预计算并共用 CPU LRU 缓存；同图跨配对、跨方向复用。默认最多 8,192 张，64×64 时约 128 MiB，满时淘汰旧项。
+- 固定使用双向图像相似度、双向距离场和速度平滑三项 loss。原始 A、B 的距离场按需准备并共用 CPU LRU 缓存；同图跨配对、跨方向复用。默认最多 8,192 张，64×64 时约 128 MiB，满时淘汰旧项；再次访问被淘汰图会重算。日志 `distance_cache` 含累计命中/未命中数、命中率和准备耗时，便于判断真实数据的缓存效果。
+- 逐像素输出头默认 `head_init_std=1e-4`，从接近恒等流起步；已有 version=3 检查点继续恢复原权重，不重新初始化。
 - 默认选最多 512 对固定验证样本，在验证书写者之间配对。每次启动按当前 `seed`、`val_batches` 与 batch 生成；设置相同则配对相同。`val_batches=0` 启用全部可配对验证源图，每个源图对应一个固定 B。
 - 默认每 1,000 步验证并保存；第 0 步、短运行结束、训练结束也验证和保存。普通日志每 50 步记录更新后的训练批次。
 - 默认预览 4 对验证图，尽量选择不同字符；只保存轨迹 GIF。帧数由 `animation_frames` 控制，首尾为原始 A、B。中间使用 `(1-t)*A(exp(tv)) + t*B(exp(-(1-t)v))`。
@@ -57,7 +58,7 @@ python twist/train-all-pair/show_inputs.py --run runs/twist-svf-pixels --output 
 | `run.json` | 配置、数据量、跳过数量、参数量与固定验证集的原图双向相似度与距离场基线 |
 | `excluded_images.json` | 排除的恒定图的原始索引、字符、书写者、划分与像素范围 |
 | `preview_pairs.json` | 固定预览对的字符与两位书写者 |
-| `metrics.jsonl` | 训练批次/固定验证集的双向相似度、双向距离场与速度平滑，及各方向分项；最大速度、双向最小 Jacobian 与非正行列式比例；训练日志含裁剪前梯度范数 |
+| `metrics.jsonl` | 三项 loss 与双向分项；速度最大值、最小 Jacobian 与非正比例；距离缓存命中及准备耗时；训练日志含裁剪前梯度范数 |
 | `best.pt`、`last.pt` | 最优验证和最新保存的训练状态，含模型、优化器、轮次/游标、配对随机状态与固定验证对 |
 | `previews/` | 轨迹 GIF，帧数由 `animation_frames` 控制 |
 | `summary.json` | 最终步数、轮次和验证指标，以及完成/短运行结束/中断状态 |

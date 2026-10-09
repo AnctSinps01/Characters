@@ -7,7 +7,7 @@ import torch
 from torch import Tensor, nn
 
 from .config import ModelConfig
-from .geometry import sample_image, time_scale, velocity_grid
+from .geometry import identity_grid, sample_image, time_scale, velocity_grid
 from .stage import RegistrationStage, validate_pair
 
 
@@ -34,8 +34,19 @@ class RegistrationResult:
     def render(self, time: float | Tensor) -> WarpResult:
         """(1-t)*A(exp(t*v)) + t*B(exp(-(1-t)*v)), without a network rerun."""
         strength = time_scale(time, self.grid, minimum=0.0, maximum=1.0)
-        times = strength.reshape(-1)
-        scaled_time = times[0] if times.numel() == 1 else times
+        # Scalar endpoint requests reuse already integrated maps and samples.
+        # Tensor times keep the differentiable path, including d(image)/dt.
+        if isinstance(time, (int, float)) and time in (0, 1):
+            identity = identity_grid(self.source.shape[0], self.source.shape[-2:],
+                                     device=self.grid.device, dtype=self.grid.dtype)
+            if time == 0:
+                original = self.source.to(self.grid.dtype)
+                return WarpResult(original, identity, self.reverse_grid, original, self.reverse_image)
+            original = self.target.to(self.grid.dtype)
+            return WarpResult(original, self.grid, identity, self.image, original)
+        # Preserve Python scalar times so internal validation cannot synchronize
+        # GPU scalars on every preview frame.
+        scaled_time = time if isinstance(time, Tensor) else float(time)
         grid = velocity_grid(self.velocity, self.source, scaled_time,
                              squaring_steps=self.squaring_steps)
         reverse_grid = velocity_grid(self.velocity, self.target, scaled_time - 1,

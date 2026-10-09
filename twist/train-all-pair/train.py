@@ -177,6 +177,7 @@ def train(args):
 
     def append_metrics(record):
         record["loss_config"] = asdict(loss_config)
+        record["distance_cache"] = data.distance_cache_stats()
         with (output / "metrics.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
@@ -193,9 +194,12 @@ def train(args):
 
     @torch.no_grad()
     def evaluate(pairs, identity=False):
-        values = {name: 0.0 for name in (("similarity", "distance") if identity else loss_names)}
-        velocity_max, jacobian_min = 0.0, math.inf
-        folded, cell_count = 0, 0
+        names = ("similarity", "distance") if identity else loss_names
+        totals = torch.zeros(len(names), device=device, dtype=torch.float64)
+        velocity_max = torch.zeros((), device=device)
+        jacobian_min = torch.full((), math.inf, device=device)
+        folded = torch.zeros((), device=device, dtype=torch.long)
+        cell_count = 0
         for chunk in pairs.split(training.batch_size):
             a, b, distance_a, distance_b = data.batch(chunk, device)
             if identity:
@@ -209,22 +213,25 @@ def train(args):
                     result = model(a, b)
                     breakdown = registration_loss(result, distance_a, distance_b, loss_config)
                 losses = {name: getattr(breakdown, name) for name in loss_names}
-                velocity_max = max(velocity_max, float(torch.linalg.vector_norm(result.velocity, dim=1).max()))
+                velocity_max = torch.maximum(velocity_max, torch.linalg.vector_norm(result.velocity, dim=1).max())
                 for map_grid in (result.grid, result.reverse_grid):
                     determinant = jacobian_determinant(map_grid)
-                    jacobian_min = min(jacobian_min, float(determinant.min()))
-                    folded += int((determinant <= 0).sum())
+                    jacobian_min = torch.minimum(jacobian_min, determinant.min())
+                    folded += (determinant <= 0).sum()
                     cell_count += determinant.numel()
-            for name in values:
-                values[name] += float(losses[name]) * len(chunk)
-        values = {name: value / len(pairs) for name, value in values.items()}
+            totals += torch.stack([losses[name] for name in names]).double() * len(chunk)
+        # One host transfer for the entire evaluation, without per-metric GPU waits.
+        summary = totals / len(pairs)
+        if not identity:
+            summary = torch.cat((summary, torch.stack((velocity_max.double(), jacobian_min.double(),
+                                                       folded.double() / cell_count))))
+        numbers = summary.cpu().tolist()
+        values = dict(zip(names, numbers[:len(names)]))
         if not all(math.isfinite(value) for value in values.values()):
             raise FloatingPointError("Nonfinite evaluated loss; inspect the last saved step")
         values["count"] = len(pairs)
         if not identity:
-            values["velocity_max"] = velocity_max
-            values["jacobian_min"] = jacobian_min
-            values["folding_fraction"] = folded / cell_count
+            values["velocity_max"], values["jacobian_min"], values["folding_fraction"] = numbers[len(names):]
         return values
 
     baseline = evaluate(validation_pairs, identity=True)

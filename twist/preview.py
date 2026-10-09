@@ -26,8 +26,12 @@ def save_preview(result, output: Path, step: int, frames: int, split="train"):
     output.mkdir(parents=True, exist_ok=True)
     stem = output / f"step_{step:07d}_{split}"
     # Unique labels retain the configured count even when images are identical.
-    animation = [tile(result.render(float(t)).image, f"t={t:.3f}  frame {index+1}/{frames}")
-                 for index, t in enumerate(torch.linspace(0, 1, frames))]
+    times = torch.linspace(0, 1, frames).tolist()
+    rendered = torch.stack([result.render(t).image[0, 0] for t in times])
+    # Transfer the small grayscale trajectory once, rather than syncing each frame.
+    frame_pixels = ((rendered.float().clamp(-1, 1) + 1) * 127.5).round().byte().cpu().numpy()
+    animation = [tile(Image.fromarray(frame_pixels[index]), f"t={t:.3f}  frame {index+1}/{frames}")
+                 for index, t in enumerate(times)]
     durations = [80] * frames
     durations[0] = durations[-1] = 600
     animation[0].save(f"{stem}_trajectory.gif", save_all=True, append_images=animation[1:],

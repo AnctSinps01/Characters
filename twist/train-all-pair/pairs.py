@@ -31,6 +31,8 @@ class PreparedPairs:
         self.storage_device = torch.device(storage_device)
         self.cache_size = distance_cache_size
         self.distance_cache = OrderedDict()
+        self.distance_hits = self.distance_misses = 0
+        self.distance_prepare_seconds = 0.0
         if not self.characters or len(set(self.characters)) != len(self.characters):
             raise ValueError("characters must be nonempty and unique")
         if any(not isinstance(char, str) or len(char) != 1 for char in self.characters):
@@ -186,36 +188,51 @@ class PreparedPairs:
 
     def batch(self, pairs, device, *, with_distance=True):
         pairs = torch.as_tensor(pairs, dtype=torch.long, device="cpu")
-        source = self.normalized(pairs[:, 0], device)
-        target = self.normalized(pairs[:, 1], device)
+        if pairs.ndim != 2 or pairs.shape[1] != 2 or not len(pairs):
+            raise ValueError("pairs must have shape [B,2] with a nonempty batch")
+        count = len(pairs)
+        image_ids = torch.cat((pairs[:, 0], pairs[:, 1]))
+        unique_ids, inverse = torch.unique(image_ids, sorted=True, return_inverse=True)
+        # Prepare on the storage device. CPU pixels never visit GPU before EDT;
+        # repeated images in either role share resizing and normalization too.
+        unique_images = self.normalized(unique_ids, self.storage_device)
+        images = unique_images[inverse.to(self.storage_device)]
         if not with_distance:
-            return source, target, None, None
+            images = images.to(device)
+            return images[:count], images[count:], None, None
         # A/B 共用按原图索引组织的 CPU LRU；跨角色和重复配对都只准备一次。
-        image_ids = torch.cat((pairs[:, 0], pairs[:, 1])).tolist()
-        images = torch.cat((source, target))
+        image_ids = image_ids.tolist()
         values, missing, positions = {}, [], []
-        seen = set()
-        for position, image_id in enumerate(image_ids):
-            if image_id in seen:
-                continue
-            seen.add(image_id)
+        for position, image_id in enumerate(unique_ids.tolist()):
             if image_id in self.distance_cache:
+                self.distance_hits += 1
                 values[image_id] = self.distance_cache[image_id]
                 self.distance_cache.move_to_end(image_id)
             else:
+                self.distance_misses += 1
                 missing.append(image_id)
                 positions.append(position)
         if missing:
-            fields = distance_fields(images[positions].detach().cpu(), threshold=self.threshold)
+            started = perf_counter()
+            fields = distance_fields(unique_images[positions].detach().cpu(), threshold=self.threshold)
+            self.distance_prepare_seconds += perf_counter() - started
             for image_id, field in zip(missing, fields):
                 field = field.clone()  # 每项拥有独立存储，使缓存上限对应实际占用。
                 values[image_id] = field
                 self.distance_cache[image_id] = field
                 if len(self.distance_cache) > self.cache_size:
                     self.distance_cache.popitem(last=False)
+        images = images.to(device)
         distance = torch.stack([values[image_id] for image_id in image_ids]).to(device)
-        count = len(pairs)
-        return source, target, distance[:count], distance[count:]
+        return images[:count], images[count:], distance[:count], distance[count:]
+
+    def distance_cache_stats(self):
+        """Cumulative unique-image lookups; preview-only batches are excluded."""
+        requests = self.distance_hits + self.distance_misses
+        return {"hits": self.distance_hits, "misses": self.distance_misses,
+                "hit_fraction": self.distance_hits / requests if requests else 0.0,
+                "cached_images": len(self.distance_cache), "capacity": self.cache_size,
+                "prepare_seconds": self.distance_prepare_seconds}
 
     def describe(self, pair):
         source, target = map(int, pair)

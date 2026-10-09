@@ -15,7 +15,7 @@ class ModelConfig:
     num_blocks: int = 8            # 单个配准网络内堆叠的 SA / CA / FFN 双流块数。
     mlp_ratio: float = 4.0         # FFN 隐藏层宽度为 int(token_dim * mlp_ratio)。
     squaring_steps: int = 7        # 先除以 2**n，再自复合 n 次，等效 2**n 个小步。
-    head_init_std: float = 1e-3    # 速度输出头权重的初始标准差。
+    head_init_std: float = 1e-4    # 逐像素头从近恒等流起步；避免初始高频速度达到约 1 像素。
 
     def __post_init__(self) -> None:
         for name in ("image_size", "patch_size", "in_channels", "token_dim",
