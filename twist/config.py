@@ -43,12 +43,12 @@ class ModelConfig:
 @dataclass(frozen=True, slots=True)
 class LossConfig:
     # 有且只有三项：双向图像相似度、双向距离场、未缩放速度的一阶平滑。
-    similarity_weight: float = 1.0  # 两个方向的梯度加权 MSE 相加。
-    mse_uniform_ratio: float = 0.2   # 各方向 MSE 的全图误差占比，其余为参考图梯度加权误差。
-    distance_weight: float = 1.0     # 双向距离场 Chamfer，相加而非取平均。
-    smoothness_weight: float = 1e-3  # 一阶速度梯度平方，按原图归一化像素间距计算。
-    distance_threshold: float = 0.0  # 距离场将 <= 此值视为前景；输入白色 +1、黑色 -1。
-    epsilon: float = 1e-8            # 归一化稳定常数；距离场的前景质量分母加 epsilon。
+    similarity_weight: float =  1.0   # 两个方向的梯度加权 MSE 相加。
+    mse_uniform_ratio: float =  0.2   # 各方向 MSE 的全图误差占比，其余为参考图梯度加权误差。
+    distance_weight: float =    1.0   # 双向距离场 Chamfer，相加而非取平均。
+    smoothness_weight: float = 0.05   # 一阶速度梯度平方，按原图归一化像素间距计算。
+    distance_threshold: float = 0.0   # 距离场将 <= 此值视为前景；输入白色 +1、黑色 -1。
+    epsilon: float = 1e-8             # 归一化稳定常数；距离场的前景质量分母加 epsilon。
 
     def __post_init__(self) -> None:
         for name in ("similarity_weight", "distance_weight", "smoothness_weight"):
