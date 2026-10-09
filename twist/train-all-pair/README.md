@@ -12,15 +12,15 @@ A、B 各自在缩放到模型尺寸后，按每张图自身的最小、最大�
 
 ```bash
 python -m pip install -r requirements.txt
-python twist/train-all-pair/train.py --device cuda --output runs/twist-svf
+python twist/train-all-pair/train.py --device cuda --output runs/twist-svf-pixels
 ```
 
-默认从零训练到累计 100,000 步。数据路径默认由脚本所在仓库确定，其他位置用 `--data /实际路径/data/prepared`。上面的输出目录为 `runs/twist-svf/`。
+默认从零训练到累计 100,000 步。数据路径默认由脚本所在仓库确定，其他位置用 `--data /实际路径/data/prepared`。上面的输出目录为 `runs/twist-svf-pixels/`。
 
 继续训练：
 
 ```bash
-python twist/train-all-pair/train.py --device cuda --resume runs/twist-svf/last.pt
+python twist/train-all-pair/train.py --device cuda --resume runs/twist-svf-pixels/last.pt
 ```
 
 也可以直接训练到指定累计步数：
@@ -33,7 +33,7 @@ python twist/train-all-pair/train.py --device cuda --steps 10000 --output runs/t
 
 [settings.py](settings.py) 设置 batch size、学习率、步数、验证/保存间隔、精度、缓存、预览和 GIF 帧数。[../config.py](../config.py) 设置模型结构、Scaling and Squaring 精度与 loss 权重。所有字段支持同名命令行参数，学习率用 `--lr`。
 
-- 单个网络内默认堆叠 8 个 SA / CA / FFN 双流块，深度由 `num_blocks` 控制。`squaring_steps=7` 先将速度缩放为 1/128，再自复合 7 次；命令行参数为 `--num-blocks`、`--squaring-steps`。
+- 单个网络内默认堆叠 8 个 SA / CA / FFN 双流块，深度由 `num_blocks` 控制。每个 token 直接预测对应 patch 所有像素的二维速度；默认 256→128 解码 64 个二维向量，拼成 `[B,2,64,64]`。`squaring_steps=7` 先将速度缩放为 1/128，再自复合 7 次；命令行参数为 `--num-blocks`、`--squaring-steps`。
 - 默认 batch=32、lr=1e-4；`precision=auto` 在支持的 CUDA 显卡上使用 BF16，其余使用 FP32。几何采样和 loss 保持 FP32。
 - 全部原始字图以 uint8 缓存；`preload_to_gpu=True` 可让它们常驻训练显卡，需显存足够。
 - writer 加载日志分别打印累计 `read`（读文件）、`copy`（复制像素）、`metadata`（标签与书写者索引）时间；全部加载后单独打印同字配对索引耗时。这些时间也保存到 `run.json` 的 `data_loading_seconds`。CPU 像素复制采用 NumPy 直接写入 Tensor 的共享存储。
@@ -45,7 +45,7 @@ python twist/train-all-pair/train.py --device cuda --steps 10000 --output runs/t
 需要临时看 GIF 对应的输入时，单独运行：
 
 ```bash
-python twist/train-all-pair/show_inputs.py --run runs/twist-svf --output inputs.png && rm -- twist/train-all-pair/show_inputs.py
+python twist/train-all-pair/show_inputs.py --run runs/twist-svf-pixels --output inputs.png && rm -- twist/train-all-pair/show_inputs.py
 ```
 
 在服务器仓库根目录生成 `inputs.png`，成功后删除临时脚本。每行对应一对 GIF 预览，左 A、右 B，行号对应 GIF 中的 `val_00`、`val_01` 等编号，并标注书写者与字符 Unicode 编码。脚本读取 `preview_pairs.json`，只加载这些图，使用该实验的缩放与归一化方式；可在训练期间运行。`--run` 指向当前实际训练输出目录；数据迁移后加 `--data /实际路径/data/prepared`。
@@ -64,7 +64,7 @@ python twist/train-all-pair/show_inputs.py --run runs/twist-svf --output inputs.
 
 检查点不包含全量字图和距离缓存。续训需要原预处理数据，迁移目录后用 `--data` 指向新位置；启动校验 manifest 指纹、归一化方式与可配对样本索引。轮次、剩余源图顺序及随机 B 的状态均恢复。`Ctrl+C` 等当前优化器更新完成后保存。
 
-当前速度场单网络检查点使用 version=2。旧串联位移模型和旧归一化版本的检查点无法直接续训；同步更新后使用新的输出目录从零开始，无需重做预处理数据。version=2 检查点可按上述命令正常续训。
+当前逐像素速度场检查点使用 version=3。旧粗网格速度场（version=2）、串联位移模型与旧归一化检查点无法直接续训；同步更新后使用新的输出目录从零开始，无需重做预处理数据。version=3 检查点可按上述命令正常续训。
 
 每次启动或续训都从当前 `settings.py` 读取训练设置，从当前 `config.py` 读取 loss 设置；命令行优先。只有模型结构配置从检查点恢复。检查点不保存训练/loss 配置，Adam 也只保存动量与参数索引，学习率等优化器选项使用本次设置。旧检查点中的训练/loss 配置与优化器选项会被忽略。
 
@@ -73,16 +73,16 @@ python twist/train-all-pair/show_inputs.py --run runs/twist-svf --output inputs.
 每次续训重算当前模型、已有 `best.pt` 和原图基线的 loss，按当前验证集和 loss 比较 best。当前参数写入 `run.json`，每条指标记录包含当时的 `loss_config`；不同 loss 定义或权重下的总 loss 不能直接比较。新训练使用新输出目录；从较早检查点恢复也应指定新目录。
 
 ```bash
-python twist/train-all-pair/train.py --device cuda --resume runs/twist-svf/last.pt --similarity-weight 1 --distance-weight 1 --smoothness-weight 0.002
+python twist/train-all-pair/train.py --device cuda --resume runs/twist-svf-pixels/last.pt --similarity-weight 1 --distance-weight 1 --smoothness-weight 0.002
 ```
 
-这将速度平滑权重从默认 `0.001` 提高为 `0.002`。需要保留原实验的 best 和日志时，另加 `--output runs/twist-svf-reweighted`，使用新的空目录。
+这将速度平滑权重从默认 `0.001` 提高为 `0.002`。需要保留原实验的 best 和日志时，另加 `--output runs/twist-svf-pixels-reweighted`，使用新的空目录。
 
 双向配准分别比较未混合的 A(exp(v)) 与 B、B(exp(-v)) 与 A。每个方向都使用参考图的 Sobel 灰度梯度平方加权，逐图归一化，默认 `mse_uniform_ratio=0.2`，即 80% 边缘加权、20% 全图误差；两方向直接相加。首尾混合帧本身等于原始 A、B，因此不用于端点配准损失。
 
 双向距离场损失使用 D_A(exp(v))² 和 D_B(exp(-v))²，分别由 B、A 的软墨迹覆盖率归一化加权后相加。黑色权重 1、白色 0，灰色保留抗锯齿覆盖程度；不进行骨架细化。前景权重和原始距离场均停止梯度，坐标采样保留梯度。
 
-速度平滑为未缩放 v 的一阶梯度平方，按归一化控制网格间距计算。日志 `similarity`、`distance`、`smoothness` 为三项损失的原值，`forward_similarity`、`reverse_similarity`、`forward_distance`、`reverse_distance` 是双向分项。默认 `total = similarity + distance + 0.001*smoothness`；三项权重通过 `--similarity-weight`、`--distance-weight`、`--smoothness-weight` 调整。
+速度平滑为未缩放 v 的一阶梯度平方，按原图归一化像素间距计算。日志 `similarity`、`distance`、`smoothness` 为三项损失的原值，`forward_similarity`、`reverse_similarity`、`forward_distance`、`reverse_distance` 是双向分项。默认 `total = similarity + distance + 0.001*smoothness`；三项权重通过 `--similarity-weight`、`--distance-weight`、`--smoothness-weight` 调整。
 
 `velocity_max` 为最大速度模长，`jacobian_min` 为正反向映射中最小的离散行列式，`folding_fraction` 为非正行列式的网格单元比例，用于观察离散积分质量。速度场内部不做裁剪；`grad` 是优化器更新前全模型梯度 L2 范数，训练梯度裁剪仍由 `gradient_clip` 控制。
 

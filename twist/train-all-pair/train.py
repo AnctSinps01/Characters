@@ -99,8 +99,8 @@ def train(args):
         device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
         torch.cuda.set_device(device)
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
-    if checkpoint and (checkpoint.get("kind") != "twist-all-pair" or checkpoint.get("version") != 2):
-        raise ValueError("expected stationary-velocity twist-all-pair checkpoint version 2; start a new run")
+    if checkpoint and (checkpoint.get("kind") != "twist-all-pair" or checkpoint.get("version") != 3):
+        raise ValueError("expected pixel-resolution stationary-velocity twist-all-pair checkpoint version 3; start a new run")
     if checkpoint and checkpoint.get("normalization") != NORMALIZATION:
         raise ValueError("Checkpoint uses a different normalization; start a new run in a new --output directory")
     model_config = configured(ModelConfig, args, checkpoint["model_config"] if checkpoint else None)
@@ -182,7 +182,7 @@ def train(args):
 
     def save_checkpoint(name):
         # 不打包全量字图或距离缓存，检查点大小主要由模型/优化器决定。
-        atomic_save({"kind": "twist-all-pair", "version": 2, "step": step, "best_total": best_total,
+        atomic_save({"kind": "twist-all-pair", "version": 3, "step": step, "best_total": best_total,
                      "model_config": asdict(model_config), "data_fingerprint": data.fingerprint,
                      "normalization": NORMALIZATION, "pairing_fingerprint": data.pairing_fingerprint,
                      "validation_pairs": validation_pairs, "sampler": sampler.state_dict(),

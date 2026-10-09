@@ -58,10 +58,66 @@ class ModelTests(unittest.TestCase):
             stage.velocity_head.weight.zero_()
             stage.velocity_head.bias.fill_(3.0)
         field = stage(*images())
-        self.assertEqual(field.shape, (2, 2, config.control_grid_size, config.control_grid_size))
+        self.assertEqual(field.shape, (2, 2, config.image_size, config.image_size))
         torch.testing.assert_close(field[:, :, 1:-1, 1:-1], torch.full_like(field[:, :, 1:-1, 1:-1], 3.0))
         for edge in (field[:, :, 0], field[:, :, -1], field[:, :, :, 0], field[:, :, :, -1]):
             self.assertEqual(int(torch.count_nonzero(edge)), 0)
+
+    def test_256_dim_token_decodes_64_xy_vectors_and_a_64_pixel_canvas(self):
+        config = ModelConfig(num_blocks=1)
+        stage = RegistrationStage(config)
+        self.assertEqual(stage.velocity_head.in_features, 256)
+        self.assertEqual(stage.velocity_head.out_features, 64 * 2)
+        self.assertEqual(config.patch_size, 8)
+        decoded = []
+        hook = stage.velocity_head.register_forward_hook(
+            lambda module, args, output: decoded.append(output))
+        try:
+            field = stage(torch.zeros(1, 1, 64, 64), torch.ones(1, 1, 64, 64))
+        finally:
+            hook.remove()
+        self.assertEqual(decoded[0].shape, (1, 64, 128))
+        self.assertEqual(field.shape, (1, 2, 64, 64))
+
+    def test_patch_vectors_land_on_their_own_pixels_and_xy_components(self):
+        config = tiny_config(num_blocks=1)
+        stage = RegistrationStage(config)
+        batch, patch, grid = 2, config.patch_size, config.patch_grid_size
+        vectors = torch.arange(batch * grid**2 * patch**2 * 2, dtype=torch.float32).reshape(
+            batch, grid**2, patch**2 * 2)
+        hook = stage.velocity_head.register_forward_hook(
+            lambda module, args, output: vectors)
+        try:
+            field = stage(*images())
+        finally:
+            hook.remove()
+        expected = torch.zeros(batch, 2, config.image_size, config.image_size)
+        for y in range(1, config.image_size - 1):
+            for x in range(1, config.image_size - 1):
+                token_index = (y // patch) * grid + x // patch
+                vector_index = 2 * ((y % patch) * patch + x % patch)
+                expected[:, :, y, x] = vectors[:, token_index, vector_index:vector_index+2]
+        torch.testing.assert_close(field, expected, rtol=0, atol=0)
+        self.assertNotEqual(float(field[0, 0, 5, 5]), float(field[0, 0, 5, 6]))
+
+    def test_each_pixel_gradient_reaches_only_its_own_decoded_vector(self):
+        config = tiny_config(num_blocks=1)
+        stage = RegistrationStage(config)
+        decoded = []
+        def capture(module, args, output):
+            output.retain_grad()
+            decoded.append(output)
+        hook = stage.velocity_head.register_forward_hook(capture)
+        try:
+            field = stage(*images())
+        finally:
+            hook.remove()
+        y, x, component = 7, 9, 1
+        field[0, component, y, x].backward()
+        token_index = (y // config.patch_size) * config.patch_grid_size + x // config.patch_size
+        vector_index = 2 * ((y % config.patch_size) * config.patch_size + x % config.patch_size) + component
+        self.assertEqual(float(decoded[0].grad[0, token_index, vector_index]), 1)
+        self.assertEqual(int(torch.count_nonzero(decoded[0].grad)), 1)
 
     def test_single_network_embeds_A_B_once_and_decodes_after_all_blocks(self):
         model = Twist(tiny_config(num_blocks=3))

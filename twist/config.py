@@ -39,11 +39,6 @@ class ModelConfig:
         """每个方向上的 patch 数量。"""
         return self.image_size // self.patch_size
 
-    @property
-    def control_grid_size(self) -> int:
-        # 预测的 patch 速度外增加一圈固定零节点，保持图像边界不动。
-        return self.patch_grid_size + 2
-
 
 @dataclass(frozen=True, slots=True)
 class LossConfig:
@@ -51,7 +46,7 @@ class LossConfig:
     similarity_weight: float = 1.0  # 两个方向的梯度加权 MSE 相加。
     mse_uniform_ratio: float = 0.2   # 各方向 MSE 的全图误差占比，其余为参考图梯度加权误差。
     distance_weight: float = 1.0     # 双向距离场 Chamfer，相加而非取平均。
-    smoothness_weight: float = 1e-3  # 一阶速度梯度平方，按归一化坐标间距计算。
+    smoothness_weight: float = 1e-3  # 一阶速度梯度平方，按原图归一化像素间距计算。
     distance_threshold: float = 0.0  # 距离场将 <= 此值视为前景；输入白色 +1、黑色 -1。
     epsilon: float = 1e-8            # 归一化稳定常数；距离场的前景质量分母加 epsilon。
 

@@ -24,7 +24,7 @@ class WarpResult:
 class RegistrationResult:
     source: Tensor
     target: Tensor
-    velocity: Tensor             # Final stationary field, in [0,1] coordinate units.
+    velocity: Tensor             # [B,2,H,W], same resolution as source; normalized coordinate units.
     image: Tensor                # Unblended A(exp(v)), for endpoint supervision.
     grid: Tensor
     reverse_image: Tensor        # Unblended B(exp(-v)).

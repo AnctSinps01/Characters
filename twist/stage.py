@@ -1,8 +1,7 @@
-"""A single velocity network with stacked SA / CA / FFN blocks."""
+"""A single velocity network decoding one 2D vector per original image pixel."""
 from __future__ import annotations
 
 from torch import Tensor, nn
-import torch.nn.functional as F
 
 from .config import ModelConfig
 from .geometry import zero_boundary
@@ -30,7 +29,7 @@ class RegistrationStage(nn.Module):
         self.blocks = nn.ModuleList(
             DualStreamBlock(self.config) for _ in range(self.config.num_blocks))
         self.output_norm = nn.LayerNorm(self.config.token_dim)
-        self.velocity_head = nn.Linear(self.config.token_dim, 2)
+        self.velocity_head = nn.Linear(self.config.token_dim, 2 * self.config.patch_size**2)
         nn.init.normal_(self.velocity_head.weight, std=self.config.head_init_std)
         nn.init.zeros_(self.velocity_head.bias)
 
@@ -40,9 +39,11 @@ class RegistrationStage(nn.Module):
         target_tokens = self.patch_embedding(target)
         for block in self.blocks:
             source_tokens, target_tokens = block(source_tokens, target_tokens)
-        # B's query tokens decode one stationary backward velocity field.
+        # Each token decodes its patch_size**2 independent (vx, vy) vectors.
         vectors = self.velocity_head(self.output_norm(target_tokens))
-        size = self.config.patch_grid_size
-        interior = vectors.transpose(1, 2).reshape(vectors.shape[0], 2, size, size)
-        controls = F.pad(interior, (1, 1, 1, 1))
-        return zero_boundary(controls)
+        batch, grid, patch = vectors.shape[0], self.config.patch_grid_size, self.config.patch_size
+        patches = vectors.reshape(batch, grid, grid, patch, patch, 2)
+        # [B,patch_y,patch_x,pixel_y,pixel_x,xy] -> [B,xy,image_y,image_x].
+        velocity = patches.permute(0, 5, 1, 3, 2, 4).reshape(
+            batch, 2, self.config.image_size, self.config.image_size)
+        return zero_boundary(velocity)

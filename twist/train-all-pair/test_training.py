@@ -155,7 +155,7 @@ class PairTrainingTests(unittest.TestCase):
     def test_resume_rejects_old_normalization(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "old.pt"
-            torch.save({"kind": "twist-all-pair", "version": 2}, checkpoint)
+            torch.save({"kind": "twist-all-pair", "version": 3}, checkpoint)
             with self.assertRaisesRegex(ValueError, "different normalization"):
                 self.run_training(["--resume", checkpoint, "--device", "cpu"])
 
@@ -178,9 +178,10 @@ class PairTrainingTests(unittest.TestCase):
             self.assertAlmostEqual(values["total"], values["similarity"] + values["distance"]
                                    + 0.001*values["smoothness"], places=6)
             checkpoint = root / "old.pt"
-            torch.save({"kind": "twist-all-pair", "version": 1}, checkpoint)
-            with self.assertRaisesRegex(ValueError, "stationary-velocity"):
-                self.run_training(["--resume", checkpoint, "--device", "cpu"])
+            for version in (1, 2):
+                torch.save({"kind": "twist-all-pair", "version": version}, checkpoint)
+                with self.assertRaisesRegex(ValueError, "pixel-resolution stationary-velocity"):
+                    self.run_training(["--resume", checkpoint, "--device", "cpu"])
 
     def test_preloaded_pixels_and_bounded_distance_cache_do_not_reopen_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -249,6 +250,8 @@ class PairTrainingTests(unittest.TestCase):
             whole = torch.load(root / "whole" / "last.pt", weights_only=True)
             resumed = torch.load(root / "split" / "last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 5)
+            self.assertEqual(resumed["version"], 3)
+            self.assertEqual(resumed["model"]["network.velocity_head.weight"].shape, (32, 16))
             for name, value in whole["model"].items():
                 torch.testing.assert_close(value, resumed["model"][name], rtol=0, atol=0)
             torch.testing.assert_close(whole["validation_pairs"], resumed["validation_pairs"], rtol=0, atol=0)

@@ -114,6 +114,21 @@ class GeometryTests(unittest.TestCase):
         self.assertGreater(float(((1 - warped[0, 0, 32]) / 2).sum()),
                            1.1 * float(((1 - source[0, 0, 32]) / 2).sum()))
 
+    def test_integration_requires_pixel_resolution_and_scales_pixels_directly(self):
+        reference = torch.zeros(1, 1, 16, 16)
+        coarse = torch.zeros(1, 2, 4, 4)
+        with self.assertRaisesRegex(ValueError, "same spatial resolution"):
+            velocity_grid(coarse, reference)
+        velocity = zero_boundary(torch.randn(1, 2, 16, 16))
+        torch.testing.assert_close(scaling_and_squaring(velocity, time=0.3, squaring_steps=0),
+                                   velocity * 0.3, rtol=0, atol=0)
+        boundary_only = torch.ones(1, 2, 2, 2, requires_grad=True)
+        displacement = scaling_and_squaring(boundary_only)
+        self.assertEqual(displacement.shape, boundary_only.shape)
+        self.assertEqual(int(torch.count_nonzero(displacement)), 0)
+        displacement.sum().backward()
+        self.assertTrue(bool(torch.isfinite(boundary_only.grad).all()))
+
     def test_invalid_times_shapes_and_squaring_exponents(self):
         field = logistic_velocity(batch=2, size=5)
         for time in (-1.01, 1.1, float("nan"), torch.ones(2, 1)):
@@ -123,7 +138,7 @@ class GeometryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 scaling_and_squaring(field, squaring_steps=exponent)
         with self.assertRaises(ValueError):
-            zero_boundary(torch.zeros(1, 2, 2, 2))
+            zero_boundary(torch.zeros(1, 2, 1, 2))
 
 
 if __name__ == "__main__":

@@ -25,8 +25,8 @@ def identity_grid(batch: int, size: tuple[int, int], *, device: torch.device,
 
 def zero_boundary(velocity: Tensor) -> Tensor:
     """Fix only the boundary; preserve every interior velocity without clipping."""
-    if velocity.ndim != 4 or velocity.shape[1] != 2 or min(velocity.shape[-2:]) < 3:
-        raise ValueError("velocity must have shape [B,2,Hc>=3,Wc>=3]")
+    if velocity.ndim != 4 or velocity.shape[1] != 2 or min(velocity.shape[-2:]) < 2:
+        raise ValueError("velocity must have shape [B,2,H>=2,W>=2]")
     field = velocity.to(dtype=geometry_dtype(velocity))
     return F.pad(field[:, :, 1:-1, 1:-1], (1, 1, 1, 1))
 
@@ -74,8 +74,8 @@ def time_scale(time: float | Tensor, reference: Tensor, *,
     return times[:, None, None, None]
 
 
-def scaling_and_squaring(velocity: Tensor, *, size: tuple[int, int] | None = None,
-                         time: float | Tensor = 1.0, squaring_steps: int = 7) -> Tensor:
+def scaling_and_squaring(velocity: Tensor, *, time: float | Tensor = 1.0,
+                         squaring_steps: int = 7) -> Tensor:
     """Approximate exp(time*v)-id as a dense displacement [B,2,H,W].
 
     Start with d=time*v/2**n, then square id+d via d <- d+d(id+d).
@@ -85,11 +85,10 @@ def scaling_and_squaring(velocity: Tensor, *, size: tuple[int, int] | None = Non
     if type(squaring_steps) is not int or squaring_steps < 0:
         raise ValueError("squaring_steps must be a nonnegative integer")
     field = zero_boundary(velocity)
-    coordinates = identity_grid(field.shape[0], size or field.shape[-2:],
+    coordinates = identity_grid(field.shape[0], field.shape[-2:],
                                 device=field.device, dtype=field.dtype)
     strength = time_scale(time, coordinates)
-    displacement = sample_displacement(field, coordinates).permute(0, 3, 1, 2)
-    displacement = displacement * strength * (2.0 ** -squaring_steps)
+    displacement = field * strength * (2.0 ** -squaring_steps)
     for _ in range(squaring_steps):
         shifted = coordinates + displacement.permute(0, 2, 3, 1)
         displacement = displacement + sample_displacement(displacement, shifted).permute(0, 3, 1, 2)
@@ -98,10 +97,14 @@ def scaling_and_squaring(velocity: Tensor, *, size: tuple[int, int] | None = Non
 
 def velocity_grid(velocity: Tensor, reference: Tensor, time: float | Tensor = 1.0,
                   *, squaring_steps: int = 7) -> Tensor:
-    """Backward sampling map exp(time*v) at the reference image resolution."""
+    """Backward map exp(time*v); velocity must already match image resolution."""
+    if velocity.ndim != 4 or velocity.shape[1] != 2 or reference.ndim != 4:
+        raise ValueError("expected velocity [B,2,H,W] and reference images [B,C,H,W]")
+    if velocity.shape[-2:] != reference.shape[-2:]:
+        raise ValueError("velocity must have the same spatial resolution as the reference image")
     if velocity.shape[0] != reference.shape[0] or velocity.device != reference.device:
         raise ValueError("velocity and reference must share batch size and device")
-    displacement = scaling_and_squaring(velocity, size=reference.shape[-2:], time=time,
+    displacement = scaling_and_squaring(velocity, time=time,
                                          squaring_steps=squaring_steps)
     coordinates = identity_grid(reference.shape[0], reference.shape[-2:], device=reference.device,
                                 dtype=displacement.dtype)
