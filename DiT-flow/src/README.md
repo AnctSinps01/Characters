@@ -13,4 +13,4 @@
 - `train.py`：训练入口，从 `DiT-flow/` 内运行 `python -m src.train`。
 - `diagnostics.py`：裁剪前的梯度范数、参数/模块诊断及安全裁剪；范数归约溢出时以 float64 重算，真实非有限梯度交由训练器停止或重试。训练目录中的 `gradient_diagnostics.jsonl` 保存诊断。
 
-模型和训练参数集中在 `config.py` 的 `ModelConfig` 与 `TrainingConfig`。新训练直接读取这些默认值，续训恢复检查点中的配置；仅运行方式开关 `preload_to_gpu` 始终读取当前 `config.py`。参考字数量在 `min_references` 到 `max_references` 之间均匀采样；数据准备默认至少保留 `max_references + 1` 个不同字符的书写者。`author_style_loss_weight` 控制作者风格损失相对 flow loss 的权重，默认值为 `0.05`；设为 `0` 可关闭。风格损失对固定 token 槽位使用归一化余弦相似度：同作者最小化 `1 - cos`，不同作者最小化 `cos²`，后者鼓励正交而不会把相反方向当作“足够不同”。一个 batch 中没有同作者重复样本时，同作者项自动为零。数据准备与完整单卡训练流程的使用方式见 [训练说明](../TRAINING.md)。网络尺寸与训练超参数仍需通过真实数据实验验证。
+模型和训练参数集中在 `config.py` 的 `ModelConfig` 与 `TrainingConfig`。完整默认值、张量接口、初始化、损失公式、采样、数据划分、优化器、EMA 验证和检查点规则统一见 [主 README](../README.md)，操作步骤见 [训练说明](../TRAINING.md)。新训练读取默认值，续训恢复保存配置；`preload_to_gpu` 始终读取当前配置，`--device`、`--workers` 和 `--stop-after` 可以在续训时指定。训练默认含作者风格损失，EMA 验证只统计 flow MSE，两个指标口径不同。

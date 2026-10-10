@@ -42,8 +42,8 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 
 | 文件 | 内容 |
 |---|---|
-| `last.pt` | 最新训练状态，用于续训 |
-| `best.pt` | 验证损失最低的训练状态 |
+| `last.pt` | 最近一次成功保存的完整训练状态，用于续训；保存间隔内可能落后于当前步 |
+| `best.pt` | EMA flow 验证损失最低时的完整训练状态；验证不含作者风格损失 |
 | `metrics.jsonl` | 训练日志 |
 | `gradient_diagnostics.jsonl` | 裁剪前梯度诊断：范数最大的参数/模块、最大梯度元素、裁剪比例与非有限值位置 |
 | `run.json` | 本次配置 |
@@ -51,7 +51,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 
 ## 5. 继续训练 / 中断后恢复
 
-续训使用检查点保存的配置；修改 `src/config.py` 只影响新训练。
+续训使用检查点保存的配置；修改 `src/config.py` 中的模型和训练超参数只影响新训练。运行方式开关 `preload_to_gpu` 例外，始终读取当前配置；`--device`、`--workers` 和 `--stop-after` 也可以在续训时指定。`--stop-after` 是绝对优化器步数，不改变保存的总步数或学习率日程。
 
 当前架构已移除生成主干的目标标准字提示通道，检查点版本为 2。版本 1 的旧检查点输入层尺寸不同，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的预处理数据仍可复用，目标标准字继续用于构造流的加噪起点，参考字仍使用手写/标准字对。
 
@@ -59,7 +59,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --resume ../runs/DiT-flow/first/last.pt --device cuda
 ```
 
-按 `Ctrl+C` 后等保存完成再退出。训练结果都在仓库根目录的 `runs/DiT-flow/first/`，退租前复制回来。
+在训练循环中按 `Ctrl+C` 后，会完成当前优化器步、跳过该步验证并保存 `last.pt`，等保存完成再退出。强杀进程或一般运行异常只保留此前成功保存的检查点。训练结果都在仓库根目录的 `runs/DiT-flow/first/`，退租前复制回来。
 
 目录迁移不改变检查点格式。已有 `data/prepared/` 无需重做；已有 `runs/first/last.pt` 可以通过 `--output ../runs/first --resume ../runs/first/last.pt` 继续原实验，无需把旧结果搬到新的示例目录。
 
@@ -90,4 +90,4 @@ du -sh ../runs/DiT-flow/first
 
 检查点写入现在使用 Python 文件流，完成后 flush/fsync，再替换旧文件。遇到文件 I/O 错误最多尝试 3 次，间隔 1、2 秒；重试使用当前内存中的同一步训练状态，不重新训练。失败的临时文件会尝试清理；持续失败会明确报错并停止，报告路径、底层错误和清理后的文件系统剩余空间，不会假装保存成功。这只能缓解短暂故障，不能解决磁盘满、配额耗尽或持续存储故障。
 
-当前顺序先保存刷新后的 `best.pt`，再保存 `last.pt`。如果后者失败，前者可能已经保存了当前步；可先查看两个检查点的 `step`，从可加载且步数更新的检查点续训。`best.pt` 同样包含完整优化器和随机数状态，支持 `--resume`。
+当前顺序先保存刷新后的 `best.pt`，再按保存间隔或结束条件保存 `last.pt`。如果后者失败，前者可能已经保存了当前步；可先查看两个检查点的 `step`，从可加载且步数更新的检查点续训。`best.pt` 同样包含完整优化器和随机数状态，支持 `--resume`；若选用的检查点早于输出目录中现有 `last.pt`，必须换新的 `--output` 目录。完整实现约定和所有默认值见 [README](README.md)。

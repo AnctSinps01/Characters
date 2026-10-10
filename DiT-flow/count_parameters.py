@@ -1,6 +1,6 @@
 """Print the parameter count of the Glyph2Hand model.
 
-Run from the repository root with::
+Run from the ``DiT-flow/`` directory with::
 
     python count_parameters.py
 

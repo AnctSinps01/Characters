@@ -95,9 +95,9 @@
 \begin{center}
 {\LARGE\bfseries Glyph2Hand}\par
 \vspace{4pt}
-{\large 分层参考编码与条件流匹配：架构图与设计说明}\par
+{\large 分层参考编码与条件流匹配：架构图与实现说明}\par
 \vspace{3pt}
-{\small 2026 年 10 月 5 日\quad 三阶段参考编码与标准字起点 flow}
+{\small 2026 年 10 月 10 日\quad 当前代码、作者风格损失与训练约定}
 \end{center}
 
 \section{任务、范围与核心假设}
@@ -107,8 +107,9 @@
 \mathcal C=\{(H_i,K_i)\}_{i=1}^{N},\qquad K_\star,
 \]
 其中 $H_i$ 是参考手写图，$K_i$ 是同一个汉字的标准字体图；$K_\star$ 是目标汉字的标准字体图。
-本版 $K_i,K_\star$ 统一使用微软雅黑（Microsoft YaHei）；符号 $K$ 仅作为标准字图的记号。
-图中的手写侧用楷书字形作示意，不代表训练样本。
+实际标准字字体由数据准备参数 \texttt{--font} 指定；训练说明使用文津宋体
+\texttt{WenJinMinchoP0-Regular.ttf}，代码不硬编码微软雅黑。
+图中的标准侧使用微软雅黑、手写侧使用楷书字形，仅作示意，不代表训练样本；符号 $K$ 仅作为标准字图的记号。
 一组指一个对应的 $(H_i,K_i)$，不是一张独立图像。所有参考手写图来自同一书写者，$N\geq1$。
 输出 $\widehat H_\star$ 应同时保持目标字内容和参考笔迹风格。
 训练真值 $H_\star$ 不进入参考集合，也不作为生成网络的独立条件输入。
@@ -123,7 +124,9 @@
 \textbf{核心假设：}组内结构已被编码进 $Z$ 个描述，后续融合可以主要依据描述内容，
 不再显式依赖原始 patch 的分组关系。这不意味着字符内容被完全消除，也不保证每个 token 对应一种笔画。
 笔画、部件及其位置仍可能是解释某种写法所必需的信息。
-这一假设和压缩容量需要通过实验验证；当前文档与 \texttt{src} 中的模型骨架保持一致，尚无训练或效果结论。
+这一假设和压缩容量需要通过实验验证；本文记录 \texttt{src} 中的实现行为，不提供生成质量或收敛效果结论。
+完整字段、命令行、日志和异常处理约定见上一级 \texttt{README.md}，服务器操作见 \texttt{TRAINING.md}。
+\texttt{README.v1-with-diagrams.*} 是历史设计，不作为当前实现依据。
 
 生成分支暂按“目标标准字加噪声作为起点”的像素空间 flow 写出完整公式。
 目标标准字仅用于构造起点，不作为主干的独立提示通道；速度网络的输入为当前状态 $x_t$、时间 $t$ 和参考风格 $S$。
@@ -327,7 +330,7 @@
 \end{center}
 \endgroup
 {\small 条带数量为示意；实际数量以 $L,Z,M,NZ$ 为准。连线表示注意力读取关系；QKV 在 MHA 内独立投影。
-标准字使用微软雅黑，手写侧字形仅作示意。生成主干的 SA、FFN 采用 AdaLN-Zero，生成 CA 采用普通 LN 与残差；
+图中字形仅作示意；实际标准字由数据准备所选字体渲染。生成主干的 SA、FFN 采用 AdaLN-Zero，生成 CA 采用普通 LN 与残差；
 集合汇总的 CA、SA、FFN 均采用普通前置 LN 与残差。参考逐组编码的归一化、残差及 FFN 从略；最终字图经过灰度映射。}
 \restoregeometry
 \section{统一符号与数据形状}
@@ -570,23 +573,54 @@ L\times p^2
 本稿暂在像素空间定义 flow，不额外引入图像自编码器。
 主干内部的 patch 特征不是独立的生成状态；若将来改为 latent flow，需另行定义共同编码空间与解码器。
 
-取固定实验超参数 $\sigma>0$，独立采样 $\epsilon\sim\mathcal N(0,I)$ 和 $t\sim\mathcal U(0,1)$，定义
+取固定实验超参数 $\sigma\geq0$（默认 $0.1$），独立采样 $\epsilon\sim\mathcal N(0,I)$ 和 $t\sim\mathcal U(0,1)$，定义
 \begin{align*}
 x_0&=K_\star+\sigma\epsilon,\\
 x_t&=(1-t)x_0+tH_\star,\\
 u&=H_\star-x_0,\\
-\mathcal L&=\mathbb E\left[\frac{1}{n^2}
+\mathcal L_{\rm flow}&=\mathbb E\left[\frac{1}{n^2}
 \left\|v_\theta(x_t,t,S)-u\right\|_F^2\right].
 \end{align*}
 同一个 $x_0$ 同时用于构造 $x_t$ 和监督速度 $u$。
 目标标准字 $K_\star$ 通过起点及训练状态影响速度预测，不作为独立通道提供；$H_\star$ 仅通过训练状态与监督目标参与训练。
-参考分支的所有可学习查询、编码器和生成主干均由该损失联合训练。
-本稿尚未引入额外的笔画标注损失、风格解耦损失或重建损失。
+参考分支的所有可学习查询、编码器和生成主干均由 flow 损失联合训练。
+训练器还默认加入作者风格损失，完整目标见下一小节；当前没有笔画标注或图像重建损失。
 
 这里的加噪是以标准字为均值的加性高斯扰动，不是把图像与噪声做权重和为 $1$ 的混合。
 $x_0$ 可能超出 $[-1,1]$；训练状态和积分中间状态均不裁剪。
 训练和推理必须使用相同的起点分布；不能仅在推理时替换纯噪声起点。
 当前像素线性插值定义的是训练路径，不保证中间状态是自然字形，也不把 $t$ 定义为手写风格强度。
+
+\subsection{作者风格损失与训练、验证口径}
+
+\texttt{author\_style\_loss} 比较一个微批次内不同样本的固定风格槽位。
+设第 $i$ 个样本的作者索引为 $a_i$，其第 $m$ 个风格 token 为 $S_{i,m}$。
+先转为 float32，并沿特征维进行 L2 归一化：
+\[
+\bar S_{i,m}=\frac{S_{i,m}}{\max(\|S_{i,m}\|_2,10^{-8})},\qquad
+c_{ijm}=\bar S_{i,m}^{\top}\bar S_{j,m}.
+\]
+定义有序配对集合 $P_s=\{(i,j):i\ne j,a_i=a_j\}$ 和
+$P_d=\{(i,j):a_i\ne a_j\}$，分别取平均：
+\begin{align*}
+\mathcal L_s&=\frac{1}{|P_s|M}\sum_{(i,j)\in P_s}\sum_m(1-c_{ijm}),\\
+\mathcal L_d&=\frac{1}{|P_d|M}\sum_{(i,j)\in P_d}\sum_m c_{ijm}^{\,2},\\
+\mathcal L_{\rm author}&=\mathcal L_s+\mathcal L_d,\\
+\mathcal L_{\rm train}&=\mathcal L_{\rm flow}+\lambda\mathcal L_{\rm author},
+\qquad\lambda=0.05\ \text{（默认）}.
+\end{align*}
+空配对集合对应项取保持梯度连接的零，不做除零；单样本批次作者项为零。
+函数还接受同作者、异作者项的独立非负权重，默认均为 $1$，训练器采用默认值。
+同作者项鼓励一致，异作者项鼓励同槽方向正交，不能把相反方向当作零损失解。
+作者项不保证内容与风格严格解耦，参考采样也不保证每个 batch 都有同作者配对。
+配对仅在每个微批次内部进行，梯度累积不增加配对范围；设
+\texttt{author\_style\_loss\_weight=0} 可关闭这一项。
+
+一个微批次只编码一次风格，同时用于速度预测和作者项。
+训练 MSE 以 float32 计算；作者 token 的归一化使用 float32，注意力和相似度运算仍受当前 autocast 上下文影响。
+EMA 模型在挂载训练专用作者权重之前复制，因此
+\texttt{train\_loss} 为上述总目标，而 \texttt{val\_loss\_ema} 只统计 EMA 的 flow MSE。
+最优检查点依据后者选择，不能把两个指标当作完全相同的损失口径。
 
 \subsection{推理与随机性}
 
@@ -598,7 +632,8 @@ $x_0$ 可能超出 $[-1,1]$；训练状态和积分中间状态均不裁剪。
 \[
 t_j=j/J,\qquad x_{t_{j+1}}=x_{t_j}+\frac1Jv_\theta(x_{t_j},t_j,S).
 \]
-仅在最后把 $x_1$ 裁剪至 $[-1,1]$ 并映射回灰度范围，得到 $\widehat H_\star$。
+\texttt{sample\_euler} 在 \texttt{no\_grad} 下仅在最后把 $x_1$ 裁剪至 $[-1,1]$，
+返回归一化图像张量；灰度映射由预览函数或调用方完成，得到 $\widehat H_\star$。
 除初始噪声外，生成过程不引入额外随机量。
 各步只能从当前状态读取目标字信息，不再额外读取干净目标标准字。
 生成输入层由双通道改为单通道；旧版双通道检查点不能直接续训，当前训练检查点版本为 $2$。
@@ -606,7 +641,8 @@ t_j=j/J,\qquad x_{t_{j+1}}=x_{t_j}+\frac1Jv_\theta(x_{t_j},t_j,S).
 当参考、目标和噪声固定时，输出确定。$\sigma=0$ 可另作确定性迁移对照，
 但同一条件下的确定性 ODE 无法产生多个不同写法。
 更大 $\sigma$ 不自动意味着更多合理变化；若需要推理时可调的噪声强度，
-应另行设计覆盖不同强度的训练和相应条件输入，本稿没有默认支持这一能力。
+应另行设计覆盖不同强度的训练和相应条件输入。采样函数允许显式传入 \texttt{noise} 和覆盖 \texttt{sigma}，
+但覆盖只改变起点，模型没有噪声强度条件输入，也没有保证不同强度下的生成效果。
 
 \section{计算成本与压缩的实际含义}
 
@@ -646,12 +682,209 @@ O\!\left(B_{\mathrm{local}}NL^2d+NZLd
 若主干有 $B_{\mathrm{gen}}$ 层、采样有 $J$ 步，其注意力成本约为
 $O(JB_{\mathrm{gen}}(L^2+LM)d)$。
 实际训练显存和时间还取决于批量大小、反向传播、前馈宽度与注意力实现。
-FlashAttention 可降低中间矩阵的显存开销；本版关于 $N$ 的线性计算规模来自结构本身。
+FlashAttention 可降低中间矩阵的显存开销；代码调用 PyTorch 的多头注意力，具体后端取决于设备、版本和精度，
+不保证始终使用 FlashAttention。本版关于 $N$ 的线性计算规模来自结构本身。
+实际 batch 将参考补齐至最大槽数，补齐组仍参加逐组编码，计算成本应按槽数而非仅有效参考数估算。
+采样只缓存风格 token；主干每步仍计算各层的风格 LN 与 K/V 投影，没有 K/V cache。
 
 压缩的代价同样明确：某种少见笔画或部件证据若在生成 $U_i$ 时已经丢失，
 后续 $M$ 个查询只能利用保留下来的信息，不能通过重新读取 $R_i$ 找回它。
 因此 $Z$ 控制单字证据容量，$M$ 控制集合汇总宽度，$B_{\rm set}$ 控制反复读取和风格 token 交互的深度，三者应分别考察。
 
+
+\section{默认配置与数值实现}
+
+\subsection{模型参数}
+
+当前模型使用通道在前的 PyTorch 张量。参考为 $[B,N,C,n,n]$，
+流状态和速度为 $[B,C,n,n]$，时间为 $[B]$，风格为 $[B,M,d]$。
+数据与训练器只支持灰度 $C=1$；底层模型可按配置构造其他通道数。
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\texttt{ModelConfig} 字段 & 默认值 & 含义 \\
+\midrule
+\texttt{image\_size / patch\_size} & $64/8$ & $q=8,L=64$ \\
+\texttt{in\_channels} & $1$ & 参考拼接为两通道，主干为单通道 \\
+\texttt{hidden\_size / num\_heads} & $256/8$ & 每头维度 $32$ \\
+\texttt{mlp\_ratio} & $4.0$ & FFN 中间维度 $1024$ \\
+\texttt{local\_depth} & $4$ & 逐组 SA--FFN 层数 \\
+\texttt{set\_pool\_depth} & $2$ & 集合 CA--SA--FFN 层数 \\
+\texttt{generator\_depth} & $8$ & 主干层数 \\
+\texttt{description\_tokens} & $32$ & 每组描述数 $Z$ \\
+\texttt{style\_tokens} & $32$ & 风格槽数 $M$ \\
+\texttt{time\_frequency\_size} & $256$ & 时间 Fourier 特征维数 \\
+\texttt{time\_scale} & $1000$ & 编码前将连续时间放大 \\
+\texttt{sigma} & $0.1$ & 加性高斯噪声强度，允许 $0$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+分块使用带 bias 的 \texttt{Conv2d}，kernel 和 stride 均为 $p$。
+图像边长需可被 $p$ 整除，$d$ 可被头数和 $4$ 整除；时间特征维需为正偶数。
+集合层数至少为 $1$，逐组及主干层数允许为 $0$。
+默认模型全部可学习参数为 $17{,}984{,}320$，其中参考编码器
+$6{,}106{,}624$，生成主干 $11{,}877{,}696$。
+\texttt{count\_parameters.py} 可用模型字段的 kebab-case 选项单独统计其他结构，不改变训练配置。
+
+二维位置按行、列各占 $d/2$ 维，每轴拼接 sin、cos；时间编码拼接 cos、sin。
+频率均以 $10000$ 为周期基数。时间编码第 $k$ 个频率为
+\[
+f_k=\exp\!\left(-\log(10000)\frac{k}{F/2}\right),\qquad
+e_{\rm raw}(t)=[\cos(t\,\tau f_k);\sin(t\,\tau f_k)],
+\]
+其中 $F$ 为 \texttt{time\_frequency\_size}，$\tau$ 为 \texttt{time\_scale}。
+
+位置与时间频率为非持久化 buffer，不写入 \texttt{state\_dict}。
+时间特征维的默认值在类定义时确定为 $256$，单独修改 $d$ 不会自动修改 $F$。
+
+全部注意力为 batch-first 的 \texttt{nn.MultiheadAttention}，dropout 为 $0$，
+Q/K/V 独立投影并带 bias，调用时不返回注意力权重。
+普通 LN 带可学习仿射，$\varepsilon=10^{-5}$；AdaLN 用无仿射 LN，$\varepsilon=10^{-6}$。
+FFN 内宽为 $\lfloor d\cdot\texttt{mlp\_ratio}\rfloor$，激活为 GELU。
+$Q_Z,Q_M$ 独立以标准差 $0.02$ 的正态分布初始化；参考输出没有额外末尾 LN。
+时间调制层和最终速度投影零初始化，其余层采用 PyTorch 默认初始化。
+最终投影为零意味着初始速度为零，不能据此将包含普通 CA 的整个主干块视为恒等映射。
+
+\subsection{训练参数}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\texttt{TrainingConfig} 字段 & 默认值 & 含义 \\
+\midrule
+\texttt{steps} & $100000$ & 优化器总步数 \\
+\texttt{batch\_size / accumulation\_steps} & $64/1$ & 微批量 / 累积次数 \\
+\texttt{min\_references / max\_references} & $1/16$ & 参考数均匀整数采样范围 \\
+\texttt{learning\_rate} & $10^{-4}$ & 基础学习率 \\
+\texttt{min\_lr\_ratio / warmup\_steps} & $0.1/1000$ & 最低比例 / 预热步数 \\
+\texttt{weight\_decay / gradient\_clip} & $0.01/1.0$ & 权重衰减 / 全局 L2 阈值 \\
+\texttt{ema\_decay} & $0.999$ & EMA 衰减 \\
+\texttt{author\_style\_loss\_weight} & $0.05$ & 作者项权重 \\
+\texttt{precision} & \texttt{bf16} & CUDA 默认精度 \\
+\texttt{preload\_to\_gpu / workers} & \texttt{False} / $8$ & 字图常驻显存 / 训练 worker 数 \\
+\texttt{val\_batches / validate\_every} & $16/1000$ & 验证批次 / 间隔 \\
+\texttt{save\_every / log\_every} & $500/50$ & 保存 / 日志间隔 \\
+\texttt{sample\_steps / seed} & $32/42$ & 预览 Euler 步数 / 种子 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+新训练直接读取 \texttt{src/config.py}，不读取额外配置文件；
+有效批量为微批量乘累积次数，每个微批损失除以累积次数后反向。
+训练使用 AdamW，betas 为 $(0.9,0.95)$，全部参数在同一组内进行权重衰减。
+学习率按从 $1$ 开始的优化器步数线性预热，再余弦衰减至基础值的最低比例。
+\texttt{--stop-after} 只提前停在绝对步数，不改变总日程。
+CUDA 支持 BF16/FP16/FP32 并启用 TF32；CPU 实际使用 FP32，只有 FP16 启用 GradScaler。
+
+\section{数据准备、划分与确定性采样}
+
+从 \texttt{DiT-flow/} 内运行 \texttt{python -m src.prepare\_data}，
+必填参数为 \texttt{--gnt-root}、\texttt{--font}、\texttt{--output}。
+可选默认值为字体索引 $0$、图像边长 $64$、边距 $4$、最少字符数 $17$、
+验证比例 $0.1$、种子 $42$；其中边长读取模型默认值，最少字符数为默认最大参考数加一。
+输出目录必须新建或为空，代码不自动区分官方训练/Test 文件。
+
+递归排序读取 GNT，每个文件视为一个作者，文件 stem 为 ID，要求至少两个文件且 ID 不重复。
+GNT 数值字段按小端解析，两个原始标签字节按 GBK 解码；截断、非法记录尺寸或标签直接报错。
+保留基本 CJK 范围 U+4E00--U+9FFF 内的单字，并用字体 cmap 排除缺字；
+每位作者每个字符仅保留首次成功处理的图像，空白及字符数不足作者计入跳过统计。
+手写和标准图分别紧裁白背景、保持宽高比，用 LANCZOS 缩放并在白色方形中居中。
+标准图先以四倍目标边长的字号渲染；默认预处理没有随机图像增强。
+
+按作者用独立种子打乱后划分 train/val。作者数为 $W$ 时，验证作者数为
+\[
+\min\bigl(W-1,\max(1,\operatorname{round}(W\cdot\texttt{val\_fraction}))\bigr).
+\]
+作者不跨集合，但同一字符类别可以在两侧出现。
+输出为 uint8 的作者 NPY、标准字 NPY，以及最后写入的 \texttt{manifest.json} 完成标志。
+数据格式版本为 $1$，与训练检查点版本 $2$ 是不同概念。
+manifest 记录字符索引、作者文件/标签/划分、尺寸、边距、字体和像素文件哈希、种子及跳过统计。
+
+训练启动逐作者加载全部 train/val 像素，只保留一份 uint8 字图。
+CPU 使用 \texttt{RawArray}，fork/spawn worker 和训练/验证共享存储；采样不再读取 NPY。
+像素占用为 $(\text{手写数}+\text{标准数})n^2$ 字节，不含模型与浮点批次。
+显存预加载只允许 CUDA，并强制训练 worker 为 $0$。
+
+每个 episode 用 \texttt{random.Random(f"\{seed\}:\{index\}")} 独立采样：
+均匀选作者、均匀选参考数，再无放回选择 $N+1$ 个不同字符，首个作为目标。
+像素转为 $\texttt{pixel}/127.5-1$，即白 $+1$、黑 $-1$；
+参考补至最大槽数，补齐值为白色，并提供布尔有效掩码和稳定的 manifest 作者索引。
+至少需要最大参考数加一个不同字符；按作者均匀抽样不等于按全部字图均匀抽样。
+掩码省略时全部槽位有效，每个样本至少一个有效槽位；应使用有限数值填充补齐图像。
+
+episode 仅由索引和种子决定，不受 worker 数和预取进度影响。
+续训从已完成步数乘有效批量继续全局索引；验证使用固定索引和训练种子加一。
+数据指纹为 manifest 原始字节的 SHA-256，空白变化也会导致续训拒绝。
+加载器校验 NPY 的 dtype/shape 和标签索引，但不重新核验记录的 NPY/字体内容哈希。
+
+\section{验证、诊断与检查点恢复}
+
+\subsection{EMA、验证和退出}
+
+每次成功优化器更新后，EMA 参数按
+$\theta_{\rm ema}\leftarrow\rho\theta_{\rm ema}+(1-\rho)\theta$ 更新。
+每隔验证间隔及计划结束步使用 EMA 做验证与预览；正常提前结束也验证。
+验证用隔离的 PyTorch RNG 和训练种子加 $10000$ 固定时间/噪声，按样本数平均 flow MSE。
+预览在全部验证损失之后采样，展示第一批最多四个样本的所有参考槽、标准字、真值和生成图。
+验证 worker 固定为 $0$；更改设备或精度不保证跨设备逐位一致。
+
+训练循环接收 SIGINT/SIGTERM 后完成当前优化器步、跳过该步验证，并保存最近状态。
+强杀或一般运行异常不会额外保存故障当前步，只保留已成功写入的检查点。
+
+\subsection{梯度与日志}
+
+AMP 反缩放后记录裁剪前全局 L2 范数，再安全裁剪；
+float32 范数归约出现非有限值时用 float64 重算，区分归约溢出与真实异常梯度。
+真实异常梯度不更新参数：FP16 降低 scale 并复用相同数据、时间与噪声，最多尝试 $16$ 次；
+BF16/FP32 直接报错停止，非有限损失也立即停止。
+诊断在启动/续训首步、日志间隔、计划结束步及异常/float64 回退时记录，
+包括最大的八个参数及直接所属模块、最大元素、裁剪比例、AMP scale、尝试序号和异常参数名。
+模块排行不是整个参考分支或主干的递归总范数；Inf/NaN 用字符串保存为合法 JSON。
+
+\texttt{metrics.jsonl} 追加训练总损失、学习率、原始梯度范数、裁剪乘数及可选 EMA 验证损失。
+普通数字保留八位小数，极大/极小数使用科学计数法；
+耗时为带秒单位字符串，CUDA 峰值显存为带 \texttt{GB} 字符串，但分母是 $1024^3$，实际单位为 GiB。
+显存字段来自 \texttt{max\_memory\_allocated}，不是 reserved memory 或单步独立峰值。
+\texttt{run.json} 记录设置、数据指纹、设备、实际精度、torch 版本与运行预加载方式，续训时重写。
+
+\subsection{保存与续训}
+
+从 \texttt{DiT-flow/} 内运行 \texttt{python -m src.train}。
+必填参数为 \texttt{--data}、\texttt{--output}。
+
+可选参数为 \texttt{--resume}、\texttt{--device}、\texttt{--workers}、\texttt{--stop-after}。
+设备默认 \texttt{auto}，选择 CUDA 或 CPU，支持显式 CUDA 索引。
+仅支持 CPU 或单张 CUDA，没有分布式入口。训练文件也支持从仓库根目录按文件路径启动，参数路径相对工作目录。
+
+检查点版本 $2$ 保存模型和 EMA 两套权重、AdamW、GradScaler、CPU/选定 CUDA 的 RNG、
+模型/训练配置、数据指纹、已完成步数和最优验证值。
+\texttt{best.pt} 在 EMA flow 验证严格改善时写入，也含完整训练状态；
+\texttt{last.pt} 按保存间隔及正常结束/响应退出请求写入，可能落后于当前内存步数。
+恢复旧版双通道版本 $1$ 会在输出写入前报错；已准备的灰度数据可以复用。
+
+续训采用保存的模型和训练超参数，仅运行开关 \texttt{preload\_to\_gpu} 始终读取当前配置，
+不写入检查点 settings；设备、worker 数、提前结束步也可通过命令行改动。
+保存步数必须小于本次终点，不能用提前结束选项延长保存的总日程。
+新运行拒绝已有结果，只允许配置/指纹一致、仅有启动元数据和空预览目录的启动重试。
+续训可使用新目录；原非空目录须有一致元数据，且 \texttt{last.pt} 不能比恢复点更新。
+从更早的 \texttt{best.pt} 回退，应选择新的输出目录。
+
+保存先完整写入 \texttt{.pt.tmp}，flush/fsync 后替换对应旧文件。
+I/O 错误最多尝试三次，间隔 $1$、$2$ 秒，使用同一步内存状态，不重复训练；
+失败临时文件尝试清理，持续失败停止，普通序列化错误直接抛出。
+先保存刷新的 best，再按条件保存 last，两者不是整体事务。
+保存需要至少额外一份完整检查点的空间，磁盘/配额故障不能由重试保证修复。
+
+\section{验证范围}
+
+从 \texttt{DiT-flow/} 内运行 \texttt{python -m unittest discover -s tests -v}。
+现有测试覆盖结构/掩码/作者损失/flow、GNT 与真实字体预处理、共享内存无文件采样、
+参考数与目标排除、设备选择、日志、梯度异常、检查点写入失败，以及小模型 CPU 续训与连续训练一致性。
+CUDA 设备选择测试使用模拟；测试不能替代真实 GPU 性能、稳定性和生成质量实验。
 
 \end{document}
 
