@@ -51,6 +51,14 @@ python twist/train-all-pair/show_inputs.py --run runs/twist-svf-pixels --output 
 
 在服务器仓库根目录生成 `inputs.png`，成功后删除临时脚本。每行对应一对 GIF 预览，左 A、右 B，行号对应 GIF 中的 `val_00`、`val_01` 等编号，并标注书写者与字符 Unicode 编码。脚本读取 `preview_pairs.json`，只加载这些图，使用该实验的缩放与归一化方式；可在训练期间运行。`--run` 指向当前实际训练输出目录；数据迁移后加 `--data /实际路径/data/prepared`。
 
+训练完成后要覆盖全部至少有两张有效样本的汉字，使用 [../generate_all.py](../generate_all.py)：
+
+```bash
+python twist/generate_all.py --checkpoint runs/twist-svf-pixels/best.pt --device auto --output runs/twist-svf-pixels/all-transitions
+```
+
+每个汉字选一对不同书写者的图，默认覆盖 train/val 全部样本，允许跨划分；输出可搜索的 `index.html`、过渡 GIF、双向未混合配准图和配对记录。只看验证样本加 `--split val`，中断后同指令加 `--resume`。完整选项和输出说明见 [../README.md](../README.md#生成全部汉字的过渡)。
+
 ## 输出与续训
 
 | 文件 | 内容 |

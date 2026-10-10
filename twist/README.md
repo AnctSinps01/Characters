@@ -15,6 +15,7 @@
 | [distance.py](distance.py) | 原始 A、B 的欧氏距离场预处理 |
 | [checkpoint.py](checkpoint.py) | 训练状态与优化器动量恢复 |
 | [preview.py](preview.py) | 双向插值轨迹 GIF |
+| [generate_all.py](generate_all.py) | 加载训练检查点，为全部至少两张有效样本的汉字生成过渡与浏览总览 |
 | [count_parameters.py](count_parameters.py) | 参数统计 |
 | tests/ | 几何、数据流、梯度和混合精度验证 |
 | [train-all-pair/](train-all-pair/README.md) | 全数据集同字手写图配对训练 |
@@ -72,3 +73,37 @@ python -m unittest discover -s twist/train-all-pair -p "test_*.py" -v
 ```
 
 训练设置见 [train-all-pair](train-all-pair/README.md)。逐像素速度场检查点为 version=3；旧粗网格速度场与串联位移检查点需新建实验从零训练，已准备的数据仍可使用。SciPy 用于双向距离场预处理，推理和反向传播由 PyTorch 执行。旧生成模型见 [DiT-flow](../DiT-flow/README.md)。
+
+## 生成全部汉字的过渡
+
+训练完成后，从仓库根目录运行 [generate_all.py](generate_all.py)，将检查点路径替换成自己的 `best.pt` 或 `last.pt`：
+
+```bash
+python twist/generate_all.py --checkpoint runs/twist-svf-audited/best.pt --device auto --output runs/twist-svf-audited/all-transitions
+```
+
+默认遍历 prepared 数据中全部汉字，**每个至少有两张有效样本的汉字随机选一对不同书写者的图，生成一份 GIF**。覆盖 train/val 合计样本，允许跨划分配对；不是生成全部两两组合。恒定图和缩放后恒定图不计入有效样本。配对由 `--seed` 固定。模型结构和图像分辨率从 version=3 检查点恢复，推理无需距离场；数据按 writer 扫描和按需读取，不加载全部字图到内存。
+
+| 输出 | 内容 |
+|---|---|
+| `index.html` | 浏览器直接打开的总览，可搜索汉字、Unicode 和书写者；图片延迟加载 |
+| `transitions/uXXXX.gif` | 左 A、中间过渡、右 B；默认 21 帧，首尾为原图 |
+| `registration/uXXXX.png` | 第一行 A、A(exp(v))、B；第二行 B、B(exp(-v))、A，查看未混合配准效果 |
+| `generation.json` | 模型/生成配置、全部配对的字符与原图位置、有效样本数量及不足两张的字符 |
+| `summary.json` | 已生成字符数、完成/中断状态与本次耗时 |
+
+默认 `--batch-size 16 --frames 21 --display-size 256 --seed 42 --split all`。`--display-size` 只控制显示面板大小，不改变模型分辨率。`--device auto` 有 CUDA 时使用 CUDA，否则 CPU；精度自动选择 BF16/FP32，也可用 `--precision fp32`。数据不在默认 `data/prepared/` 时添加 `--data /实际路径/data/prepared`；只看验证字符可用 `--split val`。
+
+中断后使用同一指令加 `--resume`，跳过已完成的汉字：
+
+```bash
+python twist/generate_all.py --checkpoint runs/twist-svf-audited/best.pt --device auto --output runs/twist-svf-audited/all-transitions --resume
+```
+
+续跑会校验检查点内容、manifest 和生成设置，避免混合不同实验；可以调小 `--batch-size`。需要换模型、随机种子、帧数或显示尺寸时使用新的输出目录。可用 `best.pt` 查看最佳验证模型，用 `last.pt` 查看最后保存的模型。
+
+脚本检查：
+
+```bash
+python -m unittest discover -s twist/tests -p "test_generate_all.py" -v
+```
