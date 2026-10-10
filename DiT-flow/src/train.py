@@ -269,7 +269,8 @@ def resolve_device(device_name: str) -> torch.device:
     return device
 
 
-def is_unstarted_run(output: Path, settings: dict, fingerprint: str) -> bool:
+def is_unstarted_run(output: Path, settings: dict, fingerprint: str,
+                     *, data_selection: dict | None = None) -> bool:
     """Allow retry of matching startup metadata, never overwrite training results."""
     metadata = output / "run.json"
     try:
@@ -277,7 +278,8 @@ def is_unstarted_run(output: Path, settings: dict, fingerprint: str) -> bool:
         if not isinstance(previous, dict):
             return False
         if comparable_settings(previous.get("settings")) != comparable_settings(settings) \
-                or previous.get("data_fingerprint") != fingerprint:
+                or previous.get("data_fingerprint") != fingerprint \
+                or previous.get("data_selection") != data_selection:
             return False
         for entry in output.iterdir():
             if entry.is_symlink():
@@ -303,7 +305,49 @@ def comparable_settings(settings):
     return settings
 
 
-def run(args):
+def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
+                writer_id: str | None, checkpoint: dict | None) -> dict | None:
+    """Choose fitting data once; a resume must keep the saved selection."""
+    saved = checkpoint.get("data_selection") if checkpoint is not None else None
+    if checkpoint is not None:
+        if not single_writer:
+            if saved is not None:
+                raise ValueError("single-author checkpoint requires the train-single entry point")
+            return None
+        if not isinstance(saved, dict) or saved.get("mode") != "single_writer_fit":
+            raise ValueError("train-single requires a single-author checkpoint to resume")
+        if writer_id is not None and writer_id != saved.get("writer_id"):
+            raise ValueError("writer-id differs from the saved single-author selection")
+        writer_id = saved.get("writer_id")
+        if not isinstance(writer_id, str):
+            raise ValueError("single-author checkpoint has no valid writer ID")
+    elif not single_writer:
+        return None
+
+    eligible = [writer for writer in manifest["writers"]
+                if writer["split"] == "train"
+                and len(writer["labels"]) > config.max_references
+                and len(set(writer["labels"])) == len(writer["labels"])]
+    if writer_id is None:
+        if not eligible:
+            raise ValueError("no training writer has distinct target + max_references characters")
+        # A stable tie-breaker keeps automatic selection independent of file order.
+        writer = min(eligible, key=lambda item: (-len(item["labels"]), item["id"]))
+    else:
+        matches = [writer for writer in eligible if writer["id"] == writer_id]
+        if not matches:
+            raise ValueError(f"writer {writer_id!r} must be a training writer with distinct "
+                             "target + max_references characters")
+        writer = matches[0]
+    selection = {"mode": "single_writer_fit", "writer_id": writer["id"],
+                 "character_count": len(writer["labels"]),
+                 "evaluation": "same_writer_seen_characters"}
+    if checkpoint is not None and selection != saved:
+        raise ValueError("single-author data selection differs from checkpoint")
+    return selection
+
+
+def run(args, *, single_writer: bool = False):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
@@ -337,6 +381,10 @@ def run(args):
         raise ValueError("model image size/channels must match prepared grayscale data")
     if checkpoint and checkpoint["data_fingerprint"] != fingerprint:
         raise ValueError("prepared dataset differs from checkpoint; refusing to resume")
+    data_selection = select_data(
+        manifest, config, single_writer=single_writer,
+        writer_id=getattr(args, "writer_id", None), checkpoint=checkpoint,
+    )
     completed = checkpoint["step"] if checkpoint else 0
     stop_step = min(config.steps, args.stop_after or config.steps)
     if not completed < stop_step:
@@ -352,7 +400,7 @@ def run(args):
                   "CUDA-resident data must be sampled in the training process.", flush=True)
             workers = 0
     if args.output.exists() and any(args.output.iterdir()) and not args.resume:
-        if not is_unstarted_run(args.output, settings, fingerprint):
+        if not is_unstarted_run(args.output, settings, fingerprint, data_selection=data_selection):
             raise ValueError("output is nonempty; use --resume or choose a new output directory")
     if (args.resume and args.output.exists() and any(args.output.iterdir())
             and not (args.output / "run.json").exists()):
@@ -360,7 +408,8 @@ def run(args):
     if checkpoint and (args.output / "run.json").exists():
         previous = json.loads((args.output / "run.json").read_text(encoding="utf-8"))
         if comparable_settings(previous["settings"]) != comparable_settings(settings) \
-                or previous["data_fingerprint"] != fingerprint:
+                or previous["data_fingerprint"] != fingerprint \
+                or previous.get("data_selection") != data_selection:
             raise ValueError("output belongs to another run; choose a new output directory")
         latest = args.output / "last.pt"
         if latest.exists():
@@ -373,7 +422,12 @@ def run(args):
         "settings": settings, "data_fingerprint": fingerprint,
         "device": str(device), "precision": precision, "torch": str(torch.__version__),
         "preload_to_gpu": config.preload_to_gpu,
+        "data_selection": data_selection,
     }, indent=2), encoding="utf-8")
+    if data_selection is not None:
+        print(f"Single-author fitting: writer={data_selection['writer_id']}, "
+              f"characters={data_selection['character_count']}; "
+              "evaluation uses the same writer and training character pool.", flush=True)
     torch.manual_seed(config.seed)
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -397,11 +451,13 @@ def run(args):
     del checkpoint
     episodes_per_step = config.batch_size
     data_device = device if config.preload_to_gpu else torch.device("cpu")
-    preloaded = PreloadedGlyphs(args.data, device=data_device, verbose=True)
+    selected_writer = data_selection["writer_id"] if data_selection is not None else None
+    preloaded = PreloadedGlyphs(args.data, device=data_device, verbose=True,
+                               writer_ids=(selected_writer,) if selected_writer is not None else None)
     if preloaded.fingerprint != fingerprint:
         raise ValueError("prepared manifest changed during startup")
     common = dict(min_references=config.min_references, max_references=config.max_references,
-                  preloaded=preloaded)
+                  preloaded=preloaded, writer_id=selected_writer)
     training = HandwritingEpisodes(args.data, "train", length=config.steps * episodes_per_step,
                                    seed=config.seed, **common)
     validation = HandwritingEpisodes(args.data, "val", length=config.val_batches * config.batch_size,
@@ -428,6 +484,7 @@ def run(args):
     def save(name):
         atomic_save({
             "version": 3, "settings": settings, "data_fingerprint": fingerprint,
+            "data_selection": data_selection,
             "step": completed, "best_val_loss": best,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
@@ -493,18 +550,21 @@ def run(args):
     print(f"Saved step {completed}: {args.output / 'last.pt'}", flush=True)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(*, single_writer: bool = False):
+    description = "Fit one automatically selected training writer." if single_writer else __doc__
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     parser.add_argument("--workers", type=int, help="override loader workers, also allowed on resume")
     parser.add_argument("--stop-after", type=int, help="stop at this absolute optimizer step without changing LR schedule")
+    if single_writer:
+        parser.add_argument("--writer-id", help="training writer ID; defaults to the writer with most characters")
     args = parser.parse_args()
     if args.stop_after is not None and args.stop_after < 1:
         parser.error("--stop-after must be positive")
-    run(args)
+    run(args, single_writer=single_writer)
 
 
 if __name__ == "__main__":

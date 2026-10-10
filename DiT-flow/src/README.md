@@ -12,6 +12,7 @@
 - `data.py`：GNT 读取、字图预处理、全部字图的 uint8 共享内存预加载、按书写者采样的参考与目标数据集。每个 episode 还带有稳定的 `author_index`，供作者风格损失组成同作者/异作者配对。训练和验证及所有 worker 共用一份字图，采样时不再读取 NPY 文件。
 - `prepare_data.py`：数据准备入口，从 `DiT-flow/` 内运行 `python -m src.prepare_data`。
 - `train.py`：训练入口，从 `DiT-flow/` 内运行 `python -m src.train`。
+- `../train-single/train.py`：单作者拟合入口，复用 `train.py`；自动选训练字符最多的作者，仅加载该作者手写图，拟合评估使用同一作者的字符池，选择记录在检查点中。
 - `diagnostics.py`：裁剪前的梯度范数、参数/模块诊断及安全裁剪；范数归约溢出时以 float64 重算，真实非有限梯度交由训练器停止或重试。训练目录中的 `gradient_diagnostics.jsonl` 保存诊断。
 
 模型和训练参数集中在 `config.py` 的两个 dataclass。完整默认值、张量接口、位置编码、初始化、双损失与配对说明、采样和版本 3 检查点规则见 [主 README](../README.md)，操作见 [训练说明](../TRAINING.md)。每 batch 更新一次，验证和预览使用当前模型。新训练读取默认值，续训恢复保存配置；运行方式开关 `preload_to_gpu` 始终读取当前配置，设备、worker 和提前结束步可由命令行指定。

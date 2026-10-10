@@ -78,15 +78,16 @@ def read_manifest(root: Path) -> tuple[dict, str]:
 
 
 class PreloadedGlyphs:
-    """All prepared pixels, eagerly loaded as uint8 on CPU or one CUDA device.
+    """Prepared pixels for all or selected writers, loaded once as uint8.
 
     On CPU, RawArray's backing is inherited by fork workers and passed by handle
     to spawn workers. CUDA storage is used only from the training process.
-    Prepared NPY files are closed before any episode is sampled.
+    The standard-glyph bank is shared; prepared NPY files are closed before
+    any episode is sampled.
     """
 
     def __init__(self, root: str | Path, *, device: str | torch.device = "cpu",
-                 verbose: bool = False):
+                 verbose: bool = False, writer_ids: tuple[str, ...] | None = None):
         self.root = Path(root).resolve()
         self.device = torch.device(device)
         if self.device.type not in ("cpu", "cuda"):
@@ -94,9 +95,16 @@ class PreloadedGlyphs:
         self.manifest, self.fingerprint = read_manifest(self.root)
         self.image_size = self.manifest["image_size"]
         self.standard_count = len(self.manifest["characters"])
+        writers = self.manifest["writers"]
+        if writer_ids is not None:
+            requested = set(writer_ids)
+            unknown = requested - {writer["id"] for writer in writers}
+            if not requested or unknown:
+                raise ValueError(f"writer_ids must select known writers; unknown={sorted(unknown)}")
+            writers = [writer for writer in writers if writer["id"] in requested]
         self.writer_ranges = {}
         self.handwriting_count = 0
-        for writer in self.manifest["writers"]:
+        for writer in writers:
             count = len(writer["labels"])
             if any(type(label) is not int or not 0 <= label < self.standard_count
                    for label in writer["labels"]):
@@ -107,7 +115,8 @@ class PreloadedGlyphs:
         if not self.nbytes:
             raise ValueError("prepared dataset has no pixels")
         if verbose:
-            print(f"Preloading all train/val glyphs: {self.handwriting_count:,} handwriting + "
+            scope = "all train/val" if writer_ids is None else "selected writer"
+            print(f"Preloading {scope} glyphs: {self.handwriting_count:,} handwriting + "
                   f"{self.standard_count:,} standards, {self.nbytes / 1024**3:.3f} GiB uint8 "
                   + ("in shared CPU memory (one copy for all workers)."
                      if self.device.type == "cpu" else f"on {self.device}."), flush=True)
@@ -125,7 +134,6 @@ class PreloadedGlyphs:
             self.standards = pixels[self.handwriting_count:]
         # Load one writer at a time to avoid a second full dataset-sized copy.
         self._load_into(self.root / "standards.npy", self.standards)
-        writers = self.manifest["writers"]
         for index, writer in enumerate(writers):
             start, count = self.writer_ranges[writer["id"]]
             self._load_into(self.root / writer["file"], self._handwriting[start:start + count])
@@ -180,7 +188,8 @@ class HandwritingEpisodes(Dataset):
 
     def __init__(self, root: str | Path, split: str, *, length: int,
                  min_references: int, max_references: int, seed: int,
-                 preloaded: PreloadedGlyphs | None = None):
+                 preloaded: PreloadedGlyphs | None = None,
+                 writer_id: str | None = None):
         self.root = Path(root)
         self._preloaded = preloaded if preloaded is not None else PreloadedGlyphs(self.root)
         if self._preloaded.root != self.root.resolve():
@@ -194,10 +203,17 @@ class HandwritingEpisodes(Dataset):
             raise ValueError("expected 1 <= min_references <= max_references")
         if length < 1:
             raise ValueError("episode count must be positive")
-        self.writers = [w for w in self.manifest["writers"] if w["split"] == split]
+        if writer_id is None:
+            self.writers = [w for w in self.manifest["writers"] if w["split"] == split]
+        else:
+            # Fitting diagnostics deliberately evaluate the same writer and
+            # character pool as training, with independently seeded episodes.
+            self.writers = [w for w in self.manifest["writers"] if w["id"] == writer_id]
         if not self.writers:
-            raise ValueError(f"no writers in {split}")
+            raise ValueError(f"no writers for split={split}, writer_id={writer_id}")
         for writer in self.writers:
+            if writer["id"] not in self._preloaded.writer_ranges:
+                raise ValueError(f"writer {writer['id']} has not been preloaded")
             labels = writer["labels"]
             if len(set(labels)) != len(labels) or len(labels) <= max_references:
                 raise ValueError(f"writer {writer['id']} needs distinct target + references")

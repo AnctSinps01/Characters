@@ -72,7 +72,7 @@ class TrainingConfig:
     author_style_loss_weight: float = 0.05  # 作者损失比例
     precision: str = "bf16"
     preload_to_gpu: bool = False            # 放进显存 | 放进内存
-    workers: int = 8
+    workers: int = 4
     val_batches: int = 16
     validate_every: int = 1_000
     save_every: int = 500

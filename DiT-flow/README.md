@@ -4,6 +4,8 @@
 
 架构图和公式见 [README.tex](readme/README.tex) / [README.pdf](readme/README.pdf)，服务器操作步骤见 [TRAINING.md](TRAINING.md)，源码索引见 [src/README.md](src/README.md)。`readme/README.v1-with-diagrams.*` 是历史设计，不代表当前实现。通用线条图变形路线见 [../twist/](../twist/README.md)。
 
+先检查模型拟合能力可用 [单作者训练入口](train-single/README.md)：运行时选择字符最多的训练作者，训练与生成评估使用同一作者的字符池，复用本训练器、双损失和续训逻辑；命令可从 `Characters/` 直接运行。
+
 ## 运行位置与入口
 
 从仓库根目录进入 `DiT-flow/` 后运行以下命令；Python 包名是 `src`，`DiT-flow` 不是导入包名。依赖和字体位于仓库根目录。
