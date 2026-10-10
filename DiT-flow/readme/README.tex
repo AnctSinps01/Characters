@@ -1,890 +1,328 @@
 % !TeX program = xelatex
 \documentclass[UTF8,fontset=fandol,zihao=5,a4paper]{ctexart}
 \usepackage[margin=20mm]{geometry}
-\usepackage{amsmath,amssymb,booktabs,tabularx,array}
-\usepackage{graphicx}
+\usepackage{amsmath,amssymb,booktabs,tabularx,array,graphicx}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,calc,positioning}
-\definecolor{diagink}{HTML}{263445}
-\definecolor{diagblue}{HTML}{3A729B}
-\definecolor{diagpurple}{HTML}{8864AB}
-\definecolor{diaggreen}{HTML}{39816E}
-\definecolor{diagorange}{HTML}{B97C31}
-\tikzset{
-  flow/.style={-{Latex[length=2mm]},draw=diagink,line width=.8pt,rounded corners=2pt},
-  refarrow/.style={flow,draw=diagblue},
-  queryarrow/.style={flow,draw=diagpurple},
-  condition/.style={flow,draw=diaggreen,dashed},
-  panel/.style={draw=diagink!18,fill=diagink!2,rounded corners=3pt},
-  block/.style={draw=diagink!65,fill=white,rounded corners=2pt,align=center,
-    font=\small,inner sep=5pt,minimum height=1cm},
-  refblock/.style={block,draw=diagblue,fill=diagblue!6},
-  queryblock/.style={block,draw=diagpurple,fill=diagpurple!7},
-  genblock/.style={block,draw=diagorange,fill=diagorange!7},
-  styleblock/.style={block,draw=diaggreen,fill=diaggreen!7},
-  note/.style={font=\scriptsize,align=center,text=diagink},
-  paneltitle/.style={font=\small\bfseries,anchor=west,text=diagink},
-  plus/.style={circle,draw=diagink,fill=white,inner sep=0pt,minimum size=.4cm,font=\small}
-}
-
-% Vertical strips are d-dimensional tokens; drawn counts are schematic.
-\definecolor{groupone}{HTML}{397BAC}
-\definecolor{grouptwo}{HTML}{3A9B8F}
-\definecolor{groupthree}{HTML}{AD7867}
-\newCJKfontfamily\yahei{Microsoft YaHei}
-\newcommand{\vtokenbank}[7]{%
-  \pgfmathsetmacro{\bankwidth}{#4*.18}
-  \node[inner sep=0pt,minimum width=\bankwidth cm,minimum height=#3cm] (#1) at (#2) {};
-  \foreach \k in {1,...,#4}{
-    \pgfmathsetmacro{\dx}{(\k-(#4+1)/2)*.18}
-    \node[draw=#5,fill=#5!15,minimum width=.105cm,minimum height=#3cm,inner sep=0pt,line width=.5pt]
-      (#1-\k) at ($(#1.center)+(\dx,0)$) {};
-    \foreach \f in {.2,.4,.6,.8}{
-      \draw[#5!45,line width=.2pt]
-      ($(#1-\k.south west)!\f!(#1-\k.north west)$)--
-      ($(#1-\k.south east)!\f!(#1-\k.north east)$);
-    }
-  }
-  \node[font=\scriptsize,anchor=west,align=left,inner sep=1pt] at ($(#1.east)+(.08,0)$) {#6};
-  \node[font=\scriptsize,anchor=east,align=right,inner sep=1pt] at ($(#1.west)+(-.08,0)$) {#7};
-}
-\newcommand{\vattention}[5]{%
-  \foreach \a in {1,...,#2}{
-    \foreach \b in {1,...,#4}{
-      \draw[#5!36,line width=.3pt] (#1-\a.south)--(#3-\b.north);
-    }
-  }
-  \draw[-{Latex[length=1.15mm]},#5!85,line width=.6pt] (#1-1.south)--(#3-1.north);
-  \draw[-{Latex[length=1.15mm]},#5!85,line width=.6pt] (#1-#2.south)--(#3-#4.north);
-}
-\newcommand{\vqueries}[4]{%
-  \foreach \k in {1,...,#2}{
-    \draw[-{Latex[length=1.2mm]},#4,line width=.6pt] (#1-\k.south)--(#3-\k.north);
-  }
-}
-\newcommand{\glyphsample}[7]{%
-  \node[draw=#4!65,fill=white,minimum width=.66cm,minimum height=.72cm,inner sep=0pt]
-    (#1) at (#2) {};
-  \node[font=\large#7,text=#4,rotate=#6] at (#1.center) {#3};
-  \foreach \f in {.25,.5,.75}{
-    \draw[#4!18,line width=.2pt]
-      ($(#1.south west)!\f!(#1.south east)$)--($(#1.north west)!\f!(#1.north east)$);
-    \draw[#4!18,line width=.2pt]
-      ($(#1.south west)!\f!(#1.north west)$)--($(#1.south east)!\f!(#1.north east)$);
-  }
-  \node[font=\scriptsize,anchor=south,inner sep=1pt] at (#1.north) {#5};
-}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
 \usepackage[hidelinks]{hyperref}
+\definecolor{styleblue}{HTML}{397BAC}
+\definecolor{contentgreen}{HTML}{39816E}
+\definecolor{floworange}{HTML}{B97C31}
+\definecolor{timepurple}{HTML}{8864AB}
+\tikzset{
+  box/.style={draw=black!45,fill=white,rounded corners=3pt,align=center,
+    font=\small,inner sep=6pt,minimum width=3cm,minimum height=.8cm},
+  stylebox/.style={box,draw=styleblue,fill=styleblue!5},
+  contentbox/.style={box,draw=contentgreen,fill=contentgreen!5},
+  flowbox/.style={box,draw=floworange,fill=floworange!5},
+  timebox/.style={box,draw=timepurple,fill=timepurple!5},
+  arrow/.style={-{Latex[length=2mm]},line width=.8pt},
+  condition/.style={arrow,dashed},
+}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\LN}{\operatorname{LN}}
+\newcommand{\MHA}{\operatorname{MHA}}
+\newcommand{\FFN}{\operatorname{FFN}}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{5pt}
 \linespread{1.12}
-\setlength{\abovedisplayskip}{7pt}
-\setlength{\belowdisplayskip}{7pt}
 \ctexset{section={format=\large\bfseries,beforeskip=12pt,afterskip=6pt},
   subsection={format=\normalsize\bfseries,beforeskip=9pt,afterskip=4pt}}
-\newcommand{\R}{\mathbb R}
-\newcommand{\LN}{\operatorname{LN}}
-\newcommand{\SA}{\operatorname{SA}}
-\newcommand{\CA}{\operatorname{CA}}
-\newcommand{\FFN}{\operatorname{FFN}}
-\newcommand{\MHA}{\operatorname{MHA}}
-\newcommand{\AdaLN}{\operatorname{AdaLN}}
-\pagestyle{plain}
 
 \begin{document}
 \begin{center}
 {\LARGE\bfseries Glyph2Hand}\par
 \vspace{4pt}
-{\large 分层参考编码与条件流匹配：架构图与实现说明}\par
+{\large 纯噪声 flow：独立内容编码与多参考风格条件}\par
 \vspace{3pt}
-{\small 2026 年 10 月 10 日\quad 当前代码、作者风格损失与训练约定}
+{\small 2026 年 10 月 10 日\quad 当前架构与训练实现，检查点版本 3}
 \end{center}
 
-\section{任务、范围与核心假设}
+\section{任务与当前实现}
 
-根据同一书写者的若干参考字，生成指定汉字的手写图。输入为
-\[
-\mathcal C=\{(H_i,K_i)\}_{i=1}^{N},\qquad K_\star,
-\]
-其中 $H_i$ 是参考手写图，$K_i$ 是同一个汉字的标准字体图；$K_\star$ 是目标汉字的标准字体图。
-实际标准字字体由数据准备参数 \texttt{--font} 指定；训练说明使用文津宋体
-\texttt{WenJinMinchoP0-Regular.ttf}，代码不硬编码微软雅黑。
-图中的标准侧使用微软雅黑、手写侧使用楷书字形，仅作示意，不代表训练样本；符号 $K$ 仅作为标准字图的记号。
-一组指一个对应的 $(H_i,K_i)$，不是一张独立图像。所有参考手写图来自同一书写者，$N\geq1$。
-输出 $\widehat H_\star$ 应同时保持目标字内容和参考笔迹风格。
-训练真值 $H_\star$ 不进入参考集合，也不作为生成网络的独立条件输入。
+输入为同一作者的 $N$ 个参考手写字 $\{H_i\}_{i=1}^N$ 和目标标准字 $K_\star$。
+参考字不再配同字标准字。模型从标准高斯噪声生成目标字的手写图，目标标准字通过独立内容 token 提供条件。
+目标手写真值 $H_\star$ 仅用于训练状态和速度监督，不放入参考集合。
+实际标准字体由数据准备参数 \code{--font} 指定，训练说明使用文津宋体；代码不硬编码字体。
 
-本版参考分支采用以下顺序：
-\begin{enumerate}
-\item 每组独立编码，在整字上下文中理解局部形状以及手写与标准字之间的关系。
-\item 每组压缩为 $Z$ 个语义描述 token，表示从该参考字中观察到的写法证据。
-\item 由 $M$ 个可学习查询初始化风格 token，经过 $B_{\rm set}$ 个集合汇总块；每层依次用交叉注意力读取全部 $NZ$ 个描述、在 $M$ 个风格 token 间做自注意力，再经过前馈网络。
-\end{enumerate}
+风格分支将每个参考字独立浓缩为 $Z$ 个描述，然后直接拼接。
+内容分支采用相同的 patch/SA 结构，参数与 SA 深度独立，不做最后的 CA 浓缩。
+主干堆叠 \textbf{SA $\to$ Content CA $\to$ Style CA $\to$ FFN}。
+训练使用 flow MSE 和作者风格损失，每个 batch 更新一次；验证、预览使用当前模型。
+完整配置、运行命令、日志与 I/O 处理见上一级 \code{README.md} 和 \code{TRAINING.md}。
+\code{README.v1-with-diagrams.*} 为历史设计；本文描述代码行为，不提供生成质量结论。
 
-\textbf{核心假设：}组内结构已被编码进 $Z$ 个描述，后续融合可以主要依据描述内容，
-不再显式依赖原始 patch 的分组关系。这不意味着字符内容被完全消除，也不保证每个 token 对应一种笔画。
-笔画、部件及其位置仍可能是解释某种写法所必需的信息。
-这一假设和压缩容量需要通过实验验证；本文记录 \texttt{src} 中的实现行为，不提供生成质量或收敛效果结论。
-完整字段、命令行、日志和异常处理约定见上一级 \texttt{README.md}，服务器操作见 \texttt{TRAINING.md}。
-\texttt{README.v1-with-diagrams.*} 是历史设计，不作为当前实现依据。
+\subsection{张量与符号}
 
-生成分支暂按“目标标准字加噪声作为起点”的像素空间 flow 写出完整公式。
-目标标准字仅用于构造起点，不作为主干的独立提示通道；速度网络的输入为当前状态 $x_t$、时间 $t$ 和参考风格 $S$。
-噪声强度、各层数和 token 数量均为可调实验超参数，尚未由实验确定。
-
-
+采用通道在前布局。批量为 $B$，通道 $C=1$，图像边长 $n$，patch 边长 $p$，
+空间 token 数 $L=(n/p)^2$，特征维 $d$，每字描述数 $Z=\code{description_tokens}$。
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+张量 & 形状 & 用途 \\
+\midrule
+参考手写字 & $[B,N,C,n,n]$ & 同一 episode 来自同一作者 \\
+目标标准字 & $[B,C,n,n]$ & 内容条件，独立编码 \\
+参考有效掩码 & $[B,N]$ & True 表示有效，每个样本至少一个 \\
+内容 $C_\star$ & $[B,L,d]$ & 保留空间位置的内容序列 \\
+风格 $U$ & $[B,NZ,d]$ & 各参考描述直接拼接 \\
+当前状态 / 速度 & $[B,C,n,n]$ & 像素空间 flow \\
+时间 & $[B]$ & 连续流位置，训练均匀采样 \\
+\bottomrule
+\end{tabularx}\end{center}
+字图映射为 $[-1,1]$，白色 $+1$、黑色 $-1$；噪声、中间状态和速度不受该范围约束。
+底层模型可配置通道数，现有数据处理、训练器和预览仅支持单通道。
 
 \clearpage
-% Give the overview its own wider page area and larger labels.
-\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}
-\section*{架构总览\quad 参考集合压缩与条件 flow}
-\begingroup
-\renewcommand{\tiny}{\fontsize{6}{7}\selectfont}
-\renewcommand{\scriptsize}{\fontsize{8}{9}\selectfont}
+\section*{架构图：三条 patch 分支与两类条件读取}
 \begin{center}
-\resizebox{!}{238mm}{%
-\begin{tikzpicture}[x=1.18cm,y=1cm,
-  tinyblock/.style={draw=diagink!50,fill=white,rounded corners=2pt,font=\scriptsize,align=center,
-    inner sep=3pt,minimum height=.38cm},
-  timelink/.style={queryarrow,dashed,line width=.65pt},
-  residual/.style={flow,draw=diagink!50,line width=.6pt},
-  gate/.style={tinyblock,draw=diagpurple,fill=diagpurple!8,minimum width=2.1cm,inner sep=2pt},
-  add/.style={plus,minimum size=.32cm,font=\scriptsize}]
-\path[use as bounding box] (0,.42) rectangle (16,-25.5);
-\node[font=\small\bfseries,text=diagblue,anchor=west] at (.6,.23)
-  {A\ 组内编码 \quad B\ 每组压缩 \qquad $N$ 组共享编码器与 $Q_Z$};
-% Reference pairs, three independent columns.
-\foreach \idx/\cx/\glyph/\col in {1/2.5/永/groupone,2/6.95/水/grouptwo,N/13.7/木/groupthree}{
-  \fill[\col!3,rounded corners=4pt] (\cx-2.18,-.12) rectangle (\cx+2.18,-5.35);
-  \node[font=\scriptsize,text=diagink] at (\cx,-.28) {第 $\idx$ 组：手写 / 微软雅黑};
-  \glyphsample{h\idx}{\cx-.48,-1.16}{\glyph}{\col}{$H_{\idx}$}{-6}{\kaishu}
-  \glyphsample{k\idx}{\cx+.48,-1.16}{\glyph}{diagink}{$K_{\idx}$}{0}{\yahei}
-  \draw[\col!70,line width=.55pt] (h\idx.south)--(\cx-.48,-1.6)--(\cx+.48,-1.6)--(k\idx.south);
-  \vtokenbank{x\idx}{\cx,-2.04}{.5}{5}{\col}{$X_{\idx}$\\$L\times d$}{}
-  \draw[flow,line width=.55pt] (\cx,-1.6)--(x\idx.north);
-  \node[font=\tiny,text=diagink,anchor=west] at (\cx+.55,-1.66) {patch + 位置};
-  \vtokenbank{r\idx}{\cx,-3.3}{.5}{5}{\col}{$R_{\idx}$\\$L\times d$}{}
-  \vattention{x\idx}{5}{r\idx}{5}{\col}
-  \node[font=\scriptsize,text=diagink,anchor=west] at (\cx+.65,-2.67) {SA $\times B_{\rm local}$};
-  \vtokenbank{q\idx}{\cx-1.18,-4.07}{.5}{3}{diagpurple}{}{$Q_Z$\\$Z\times d$}
-  \vtokenbank{u\idx}{\cx,-4.97}{.5}{3}{\col}{$U_{\idx}$\\$Z\times d$}{}
-  \vattention{r\idx}{5}{u\idx}{3}{\col}
-  \vqueries{q\idx}{3}{u\idx}{diagpurple}
-  \node[font=\tiny,text=diagpurple] at (\cx-.6,-4.12) {Q};
-  \node[font=\scriptsize,text=diagink,anchor=west] at (\cx+.55,-4.12) {K,V};
-  \node[font=\scriptsize,text=diagink,anchor=west] at (\cx+.55,-4.49) {CA};
+\resizebox{!}{208mm}{%
+\begin{tikzpicture}[x=.95cm,y=1cm]
+\path[use as bounding box] (0,1) rectangle (16,-18.5);
+\node[stylebox] (ref) at (2,0) {同作者参考手写字\\$H_1,\ldots,H_N$};
+\node[contentbox] (standard) at (14,0) {目标标准字\\$K_\star$};
+\node[flowbox] (noise) at (8,0) {纯高斯起点\\$x_0=\epsilon\sim\mathcal N(0,I)$};
+\node[stylebox] (refpatch) at (2,-1.6) {patch 投影 $Cp^2\to d$\\加一次二维位置 $P_{xy}$};
+\node[contentbox] (contentpatch) at (14,-1.6) {patch 投影 $Cp^2\to d$\\加一次二维位置 $P_{xy}$};
+\node[flowbox] (state) at (8,-1.6) {当前状态 $x_t$};
+\node[stylebox] (refsa) at (2,-3.2) {SA $\to$ FFN\\$\times B_s$；逐字共享参数};
+\node[contentbox] (contentsa) at (14,-3.2) {SA $\to$ FFN\\$\times B_c$；独立参数与深度};
+\node[flowbox] (genpatch) at (8,-3.2) {patch 投影 $Cp^2\to d$\\加一次二维位置 $P_{xy}$};
+\node[stylebox] (pool) at (2,-4.9) {可学习查询 $Q_Z$\\一层 CA $\to$ FFN\\查询与输出不加位置编码};
+\node[contentbox] (content) at (14,-4.9) {内容 $C_\star$：$L\times d$\\保留全部空间 token\\不做 CA 浓缩};
+\node[stylebox] (style) at (2,-6.7) {每字 $Z$ 个描述直接拼接\\$U$：$NZ\times d$\\无参考集合浓缩};
+\node[flowbox] (sa) at (8,-7.4) {SA\\AdaLN-Zero + 残差门};
+\node[flowbox] (cca) at (8,-9.2) {Content CA\\普通 LN + 残差};
+\node[flowbox] (sca) at (8,-11) {Style CA\\普通 LN + 残差\\屏蔽补齐描述};
+\node[flowbox] (ffn) at (8,-12.8) {FFN\\AdaLN-Zero + 残差门};
+\node[timebox] (time) at (14,-12.8) {$t\to$ sin/cos $\to$ MLP\\各块独立 $6d$ 时间调制\\作用于 SA / FFN};
+\node[flowbox] (head) at (8,-14.8) {时间调节 LN + 共享输出投影\\$d\to Cp^2$，按位置拼回速度};
+\node[flowbox] (euler) at (8,-16.5) {$x_{t+\Delta t}=x_t+\Delta t\,v_\theta$\\到终点后裁剪 $[-1,1]$};
+\foreach \a/\b in {ref/refpatch,refpatch/refsa,refsa/pool,pool/style,
+standard/contentpatch,contentpatch/contentsa,contentsa/content,
+noise/state,state/genpatch,genpatch/sa,sa/cca,cca/sca,sca/ffn,ffn/head,head/euler}{
+  \draw[arrow] (\a.south)--(\b.north);
 }
-\node[font=\Large\bfseries,text=diagink!80,inner sep=0pt] at (10.325,-2.75) {$\boldsymbol{\cdots}$};
-% Concatenate the group summaries along the token dimension.
-\node[font=\small\bfseries,text=diaggreen,anchor=west] at (.6,-5.82) {C\ 集合汇总};
-\draw[draw=diagink!30,fill=white,rounded corners=2pt] (6.5,-5.87) rectangle (9.42,-6.65);
-\vtokenbank{c1}{7,-6.26}{.55}{3}{groupone}{}{}
-\vtokenbank{c2}{7.77,-6.26}{.55}{3}{grouptwo}{}{}
-\vtokenbank{cN}{8.98,-6.26}{.55}{3}{groupthree}{}{}
-\node[font=\scriptsize,text=diagink] at (8.36,-6.26) {$\cdots$};
-\node[font=\scriptsize,anchor=west,align=left] at (9.55,-6.26) {$U$\\$NZ\times d$};
-\draw[flow,draw=groupone,line width=.65pt] (u1.south)--(2.5,-5.58)--(c1.north);
-\draw[flow,draw=grouptwo,line width=.65pt] (u2.south)--(c2.north);
-\draw[flow,draw=groupthree,line width=.65pt] (uN.south)--(13.7,-5.58)--(cN.north);
-\node[font=\scriptsize,fill=white,inner sep=1pt] at (11.2,-5.81) {沿 token 维拼接};
-\vtokenbank{qm}{4.65,-8.05}{.55}{4}{diagpurple}{}{$S^{(0)}=Q_M$\\$M\times d$}
-\draw[draw=diaggreen!55,fill=diaggreen!3,rounded corners=3pt]
-  (6.05,-7.16) rectangle (10.2,-8.82);
-\node[font=\scriptsize\bfseries,text=diaggreen] at (8.125,-7.42) {集合汇总模块};
-\node[tinyblock,draw=diaggreen,fill=white,minimum width=.9cm] (setca) at (6.85,-8.08) {CA};
-\node[tinyblock,draw=diaggreen,fill=white,minimum width=.9cm] (setsa) at (8.12,-8.08) {SA};
-\node[tinyblock,draw=diaggreen,fill=white,minimum width=1.05cm] (setffn) at (9.43,-8.08) {FFN};
-\draw[queryarrow,line width=.65pt] (qm.east)--node[above,font=\tiny] {Q}(setca.west);
-\draw[flow,draw=diaggreen,line width=.65pt] (setca.east)--(setsa.west);
-\draw[flow,draw=diaggreen,line width=.65pt] (setsa.east)--(setffn.west);
-\draw[condition,line width=.7pt] (7.96,-6.65)--(setca.north);
-\node[font=\tiny,text=diaggreen,anchor=east] at (7.63,-6.9) {$U$：K,V};
-\node[font=\tiny,text=diaggreen] at (8.12,-8.61) {$\times B_{\rm set}$；每层独立参数};
-\vtokenbank{style}{12.15,-8.08}{.6}{4}{diaggreen}{$S=S^{(B_{\rm set})}$\\$M\times d$}{}
-\draw[flow,draw=diaggreen,line width=.7pt] (setffn.east)--(style.west);
-\node[font=\tiny,text=diagink,align=left,anchor=west] at (10.55,-6.87)
-  {$U$ 不更新、不做 SA\\每层 CA 都读取同一份 $U$};
-% Generation: only SA and FFN use the block's time modulation.
-\draw[diagink!18,line width=.55pt] (.6,-9.08)--(15.5,-9.08);
-\node[font=\small\bfseries,text=diagorange,anchor=west] at (.6,-9.46)
-  {生成：$L=(n/p)^2$ 个目标 token，全程保留空间位置};
-\draw[draw=diagorange!50,fill=diagorange!2,rounded corners=4pt] (6.12,-11.1) rectangle (10.72,-20.67);
-\node[font=\scriptsize,text=diagorange,anchor=west,align=left] at (11,-11.55) {DiT block\\$\times B_{\rm gen}$};
-\glyphsample{xt}{8,-10.55}{沐}{diagorange}{$x_t$}{-3}{\kaishu}
-\draw[diagorange!35,line width=.6pt] (7.73,-10.36)--(8.25,-10.75);
-\draw[diagorange!35,line width=.6pt] (7.75,-10.76)--(8.23,-10.34);
-\node[font=\scriptsize,anchor=east] at (6.65,-10.31) {$x_0=K_\star+\sigma\epsilon$};
-\draw[timelink] (6.2,-10.55)--(xt.west);
-\vtokenbank{t0}{8,-11.58}{.46}{5}{diagorange}{$T$\\$L\times d$}{}
-\draw[flow,line width=.55pt] (xt.south)--(t0.north);
-\node[font=\tiny,text=diagink,anchor=west] at (8.7,-10.91) {单通道 patch：$p^2\to d$};
-% Shared time embedding, one separate 6d projection per block.
-\node[queryblock,font=\scriptsize,minimum height=.33cm,inner sep=2pt] (time) at (2.8,-9.97) {$t\in[0,1]$};
-\node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (tembed) at (2.8,-10.62) {sin/cos + 两层 MLP};
-\draw[timelink] (time)--(tembed);
-\vtokenbank{te}{2.8,-11.27}{.38}{1}{diagpurple}{$e(t)\in\mathbb R^d$}{}
-\draw[timelink] (tembed.south)--(te.north);
-\node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (mod6) at (2.8,-12.08)
- {SiLU + Linear\\$d\to6d$；零初始化};
-\draw[timelink] (te.south)--(mod6.north);
-\node[font=\tiny,text=diagpurple,align=center] at (2.8,-12.88)
- {每个 block 独立映射\\SA / FFN 各一组 $(a,b,g)$};
-\node[draw=diagpurple!45,fill=diagpurple!3,rounded corners=2pt,
-  font=\scriptsize,text=diagpurple,align=left,inner sep=5pt] at (3.3,-15.45)
- {$g$：逐通道残差门控\\
-  $g(t)\in\mathbb R^d$，所有 token 共用\\
-  $h_{ij}\mapsto g_j(t)\,h_{ij}$\\
-  $h$ 为 SA / FFN 的输出\\
-  无 sigmoid；初始 $g=0$};
-% SA: AdaLN, attention, gate, residual.
-\node[tinyblock,draw=diagpurple,minimum width=1.7cm] (adsa) at (8,-12.2) {AdaLN};
-\draw[flow,line width=.55pt] (t0.south)--(adsa.north);
-\vtokenbank{sain}{8,-12.8}{.4}{5}{diagorange}{}{}
-\vtokenbank{saout}{8,-13.68}{.4}{5}{diagorange}{}{}
-\draw[flow,line width=.55pt] (adsa.south)--(sain.north);
-\vattention{sain}{5}{saout}{5}{diagorange}
-\node[font=\scriptsize,anchor=west] at (8.8,-13.24) {SA};
-\node[font=\tiny,text=diagink,anchor=west] at (8.8,-13.68) {$h_{\rm SA}$};
-\node[gate] (gsa) at (8,-14.11) {$g_{\rm SA}\odot h_{\rm SA}$};
-\node[font=\scriptsize,text=diagpurple,anchor=west] at (9.1,-14.11) {逐通道乘法};
-\node[add] (asa) at (8,-14.59) {$+$};
-\draw[flow,line width=.55pt] (saout.south)--(gsa.north);
-\draw[flow,line width=.55pt] (gsa.south)--(asa.north);
-\draw[residual] (t0.west)--(6.5,-11.58)--(6.5,-14.59)--(asa.west);
-\draw[timelink] (mod6.east)--(5.3,-12.08)--(5.3,-12.2)--(adsa.west);
-\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (6.06,-11.98) {$a_{\rm SA},b_{\rm SA}$};
-\draw[timelink] (5.3,-12.2)--(5.3,-14.11)--(gsa.west);
-\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (6.85,-13.91) {$g_{\rm SA}$};
-% CA: ordinary pre-LN and residual, no additional time modulation.
-\node[tinyblock,minimum width=1.7cm] (lnca) at (8,-15.13) {LN};
-\draw[flow,line width=.55pt] (asa.south)--(lnca.north);
-\vtokenbank{cain}{8,-15.69}{.4}{5}{diagorange}{}{}
-\vtokenbank{caout}{8,-16.78}{.4}{5}{diagorange}{}{}
-\draw[flow,line width=.55pt] (lnca.south)--(cain.north);
-\vqueries{cain}{5}{caout}{diagorange}
-\vtokenbank{smemory}{12.5,-15.66}{.6}{4}{diaggreen}{$S$\\$M\times d$}{}
-\draw[condition,line width=.8pt] (style.south)--(12.15,-9.18)--(12.5,-9.18)--(smemory.north);
-\vattention{smemory}{4}{caout}{5}{diaggreen}
-\node[font=\scriptsize,text=diaggreen] at (11.1,-15.56) {LN $\to$ K,V};
-\node[font=\tiny,text=diagorange] at (7.25,-16.19) {Q};
-\node[font=\scriptsize,fill=diagorange!2,inner sep=1pt,anchor=west] at (8.8,-16.19) {CA};
-\node[font=\tiny,text=diagink,align=center] at (12.5,-17.28) {普通 LN + 残差\\CA 无独立时间调节};
-\node[add] (aca) at (8,-17.3) {$+$};
-\draw[flow,line width=.55pt] (caout.south)--(aca.north);
-\fill[diagink!70] (8,-14.84) circle (.025);
-\draw[residual] (8,-14.84)--(6.5,-14.84)--(6.5,-17.3)--(aca.west);
-% FFN: same standard AdaLN-Zero pattern as SA.
-\node[tinyblock,draw=diagpurple,minimum width=1.7cm] (adffn) at (8,-17.95) {AdaLN};
-\node[tinyblock,minimum width=1.7cm] (ffn) at (8,-18.6) {逐 token FFN};
-\node[gate] (gffn) at (8,-19.16) {$g_{\rm FFN}\odot h_{\rm FFN}$};
-\node[font=\scriptsize,text=diagpurple,anchor=west] at (9.1,-19.16) {逐通道乘法};
-\node[add] (affn) at (8,-19.72) {$+$};
-\draw[flow,line width=.55pt] (aca.south)--(adffn.north);
-\draw[flow,line width=.55pt] (adffn.south)--(ffn.north);
-\draw[flow,line width=.55pt] (ffn.south)--(gffn.north);
-\node[font=\tiny,text=diagink,anchor=west] at (9.1,-18.78) {$h_{\rm FFN}$};
-\draw[flow,line width=.55pt] (gffn.south)--(affn.north);
-\fill[diagink!70] (8,-17.61) circle (.025);
-\draw[residual] (8,-17.61)--(6.5,-17.61)--(6.5,-19.72)--(affn.west);
-\draw[timelink] (mod6.west)--(1.3,-12.08)--(1.3,-17.95)--(adffn.west);
-\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (5.65,-17.74) {$a_{\rm FFN},b_{\rm FFN}$};
-\draw[timelink] (1.3,-17.95)--(1.3,-19.16)--(gffn.west);
-\node[font=\tiny,text=diagpurple,fill=white,inner sep=1pt] at (5.65,-18.94) {$g_{\rm FFN}$};
-\vtokenbank{tout}{8,-20.31}{.46}{5}{diagorange}{$L\times d$}{}
-\draw[flow,line width=.55pt] (affn.south)--(tout.north);
-% Final head: independent 2d time modulation and one shared patch projection.
-\node[tinyblock,draw=diagpurple,fill=diagpurple!5,minimum width=2.5cm] (mod2) at (2.8,-21.4)
- {SiLU + Linear\\$d\to2d$；零初始化};
-\draw[timelink] (te.west)--(.85,-11.27)--(.85,-21.4)--(mod2.west);
-\node[tinyblock,minimum width=2.5cm] (head) at (8,-21.4) {AdaLN\\共享线性层 $d\to p^2$};
-\draw[flow,line width=.55pt] (tout.south)--(head.north);
-\draw[timelink] (mod2.east)--node[above,font=\tiny,text=diagpurple] {$a_{\rm out},b_{\rm out}$}(head.west);
-\vtokenbank{vpatch}{8,-22.24}{.5}{5}{diaggreen}{$L\times p^2$}{}
-\draw[flow,line width=.55pt] (head.south)--(vpatch.north);
-\node[draw=diaggreen!75,fill=diaggreen!4,minimum width=.72cm,minimum height=.72cm,inner sep=0pt] (vel) at (8,-23.26) {};
-\foreach \xx in {-.36,-.12,.12,.36}{
- \draw[diaggreen!50,line width=.35pt] ($(vel.center)+(\xx,-.36)$)--($(vel.center)+(\xx,.36)$);
- \draw[diaggreen!50,line width=.35pt] ($(vel.center)+(-.36,\xx)$)--($(vel.center)+(.36,\xx)$);
-}
-\fill[diaggreen!50] ($(vel.center)+(-.12,-.12)$) rectangle ($(vel.center)+(.12,.12)$);
-\fill[diaggreen!25] ($(vel.center)+(-.36,.12)$) rectangle ($(vel.center)+(-.12,.36)$);
-\draw[flow,line width=.55pt] (vpatch.south)--node[right,font=\tiny] {按位置拼回}(vel.north);
-\node[font=\scriptsize,anchor=east,align=right] at (7.46,-23.26) {$\widehat v_t$\\$n\times n$};
-\node[add] (euler) at (10.6,-23.26) {$+$};
-\draw[flow,draw=diaggreen,line width=.65pt] (vel.east)--node[above,font=\scriptsize] {$\Delta t$}(euler.west);
-\node[font=\scriptsize] (xprev) at (10.6,-22.35) {$x_t$};
-\draw[flow,draw=diagorange,line width=.6pt] (xprev.south)--(euler.north);
-\glyphsample{final}{13.05,-23.26}{沐}{diaggreen}{$\widehat H_\star$}{-6}{\kaishu}
-\draw[flow,draw=diaggreen,line width=.65pt] (euler.east)--node[above,font=\scriptsize] {$t=1$}(final.west);
-% The updated state feeds back to x_t; crossings have no junction.
-\draw[flow,draw=diagink!55,line width=.6pt,preaction={draw=white,line width=2pt}]
- (euler.south)--(10.6,-24.08)--(15.65,-24.08)--(15.65,-9.85)--(6.95,-9.85)--(6.95,-10.55)--(xt.west);
-\node[font=\scriptsize,text=diagink,anchor=east] at (10.35,-24.08) {未到终点：$x_{t+\Delta t}\to x_t$};
-% Visual legend and exact meaning of the modulation.
-\draw[diagink!18,line width=.55pt] (.6,-24.55)--(15.5,-24.55);
-\vtokenbank{legend}{1.0,-25.02}{.4}{1}{diagblue}{$1$ 个 $d$ 维 token}{}
-\node[font=\scriptsize,text=diagpurple,anchor=west] at (4.5,-24.87) {紫色：查询参数 / 时间调节};
-\node[font=\scriptsize,anchor=west] at (4.5,-25.21) {$\mathrm{AdaLN}(T)=(1+a)\odot\mathrm{LN}(T)+b$};
-\node[font=\scriptsize,text=diagink,align=left,anchor=west] at (12,-25.0) {$\odot$：逐元素乘法\\$+$：残差相加};
+\draw[condition,draw=contentgreen] (content.south)--(14,-9.2)--(cca.east);
+\draw[condition,draw=styleblue] (style.south)--(2,-11)--(sca.west);
+\draw[condition,draw=timepurple] (time.north)--(11.2,-12)--(11.2,-7.4)--(sa.east);
+\draw[condition,draw=timepurple] (time.west)--(ffn.east);
+\draw[condition,draw=timepurple] (time.south)--(14,-14.8)--(head.east);
+\draw[arrow,draw=floworange] (euler.west)--(5,-16.5)--(5,-1.6)--(state.west);
+\node[font=\scriptsize,anchor=east,align=right,text=floworange] at (4.8,-8.5) {未到终点\\继续积分};
+\begin{scope}[on background layer]
+\node[draw=floworange!50,fill=floworange!2,rounded corners=4pt,
+fit=(sa)(cca)(sca)(ffn),inner sep=10pt] {};
+\end{scope}
+\node[font=\small,text=floworange] at (11.7,-6.4) {主干块 $\times B_g$};
+\node[font=\small,align=center] at (8,-18) {条件编码在积分前各计算一次；每层分别读取同一份 $C_\star$ 与 $U$};
 \end{tikzpicture}}
 \end{center}
-\endgroup
-{\small 条带数量为示意；实际数量以 $L,Z,M,NZ$ 为准。连线表示注意力读取关系；QKV 在 MHA 内独立投影。
-图中字形仅作示意；实际标准字由数据准备所选字体渲染。生成主干的 SA、FFN 采用 AdaLN-Zero，生成 CA 采用普通 LN 与残差；
-集合汇总的 CA、SA、FFN 均采用普通前置 LN 与残差。参考逐组编码的归一化、残差及 FFN 从略；最终字图经过灰度映射。}
-\restoregeometry
-\section{统一符号与数据形状}
+{\small 风格、内容和状态均在 patch 投影后加一次位置编码；风格浓缩查询及描述不加位置编码。
+图中的 CA 表示主干独立注意力子层；风格浓缩模块含一层 CA 和一个 FFN，均有前置 LN 与残差。}
 
-所有图像先映射至 $[-1,1]$，采用 $n\times n$ 单通道灰度图。
-块边长为 $p$，要求 $p\mid n$。每边块数为 $q=n/p$，每组块数为 $L=q^2$。
-这里使用 $q$ 表示每边块数，避免与 flow 状态 $x_t$ 混淆。
-下表省略批次维；每行特征都是一个 $d$ 维 token。
+\clearpage
+\section{风格与内容编码}
 
-\begin{center}
-\small
+对第 $i$ 个参考手写字，定义
+\[
+R_i=E_s\bigl(\operatorname{Patch}_s(H_i)+P_{xy}\bigr)\in\mathbb R^{L\times d},
+\qquad U_i=\operatorname{Pool}(Q_Z,R_i)\in\mathbb R^{Z\times d}.
+\]
+每字独立编码，各字共享 patch 投影、$B_s=\code{local_depth}$ 个 SA--FFN 块和可学习查询 $Q_Z$。
+每个 SA--FFN 子层采用普通前置 LN 与残差，FFN 为两层线性映射，中间 GELU。
+\textbf{Pool 中恰好只有一层 CA}，随后一个 FFN：
+\begin{align*}
+\widetilde Q&=Q_Z+\MHA(\LN_q(Q_Z),\LN_r(R_i),\LN_r(R_i)),\\
+U_i&=\widetilde Q+\FFN(\LN_f(\widetilde Q)).
+\end{align*}
+$Q_Z$ 是共享训练参数，以标准差 $0.02$ 的正态分布初始化；查询和浓缩输出均不添加位置编码。
+浓缩后不再做自注意力，不保留原始空间 token 旁路。
+直接拼接 $U=[U_1;\ldots;U_N]$，主干读取全部 $NZ$ 个描述，没有集合浓缩层或其他汇总查询。
+描述槽位不等于预先指定的笔画类别，内容与风格的严格解耦也不由结构保证。
+
+内容分支为
+\[
+C_\star=E_c\bigl(\operatorname{Patch}_c(K_\star)+P_{xy}\bigr)\in\mathbb R^{L\times d}.
+\]
+其 patch 投影和 SA--FFN 与单参考字风格编码同构，参数完全独立，
+$B_c=\code{content_depth}$ 可单独调整；不执行最后的 Pool，保持空间 token。
+内容和风格都不接受时间/当前状态输入，可在积分步之间缓存，训练更新后缓存需重算。
+
+\subsection{参考重排与掩码}
+
+参考重排只会重排 $U$ 的整组行。主干 Style CA 对 K/V 同步重排不变，因此同样重排有效掩码后，
+固定内容、状态和时间的速度结果不变，允许浮点误差。
+代码不对拼接序列再添加组序号或位置编码。
+参考掩码 True 表示有效，扩展到每字 $Z$ 个描述后，在每层 Style CA 中取反为 padding mask。
+省略掩码时全部有效，拒绝一个样本所有参考均无效的情况。
+补齐图像必须使用有限数值；数据集补白 $+1$，补齐槽仍会参加逐字编码。
+
+\section{主干与时间调制}
+
+主干仅将当前流状态分块：$T=\operatorname{Patch}_g(x_t)+P_{xy}$。
+目标标准字只作为内容 memory，不拼为图像通道，也不参与起点构造。
+每个 block 使用独立时间映射生成 SA/FFN 的缩放、平移和残差门：
+\[
+(a_s,b_s,g_s,a_f,b_f,g_f)=\operatorname{Split}_6(\operatorname{Linear}(\operatorname{SiLU}(e(t)))),
+\quad D_j(T)=(1+a_j)\odot\LN_j(T)+b_j.
+\]
+六个 $d$ 维向量在该样本全部 token 间广播，gate 不使用 sigmoid。
+完整顺序为
+\begin{align*}
+A&=D_s(T),\\
+T_s&=T+g_s\odot\MHA_s(A,A,A),\\
+T_c&=T_s+\MHA_c(\LN_{cq}(T_s),\LN_{ck}(C_\star),\LN_{ck}(C_\star)),\\
+T_u&=T_c+\MHA_u(\LN_{uq}(T_c),\LN_{uk}(U),\LN_{uk}(U)),\\
+T^+&=T_u+g_f\odot\FFN(D_f(T_u)).
+\end{align*}
+Content CA 和 Style CA 参数独立，均为普通前置 LN 和残差，没有单独的时间调节或零门。
+SA 和 FFN 的 LN 无仿射，$\varepsilon=10^{-6}$；普通 LN 有可学习仿射，$\varepsilon=10^{-5}$。
+所有 MHA 为 batch-first、dropout $0$、带 bias，Q/K/V 独立投影，不绑定 K/V，调用不返回注意力权重。
+
+时间特征频率为 $f_k=\exp(-\log(10000)k/(F/2))$，
+原始特征拼接 $\cos(t\tau f_k)$、$\sin(t\tau f_k)$，再经 Linear--SiLU--Linear 得到 $e(t)$。
+$F$ 为时间特征维，$\tau$ 为时间放大倍数。二维位置按行/列各占 $d/2$ 维，每轴拼接 sin/cos。
+位置和频率为非持久化 buffer，不写入 state dict。
+
+输出头用独立 SiLU--Linear 产生 $2d$ 个 scale/shift，调节无仿射 LN，再共享线性投影为每块 $Cp^2$ 个速度并拼回图像。
+主干 $6d$ 调制、输出头 $2d$ 调制和速度投影均零初始化；初始速度为零，普通 CA 仍有残差，整个 block 不保证恒等。
+
+\section{双损失与作者配对方式}
+
+\subsection{纯噪声 flow MSE}
+
+独立采样 $\epsilon\sim\mathcal N(0,I)$ 和 $t\sim\mathcal U(0,1)$：
+\begin{align*}
+x_0&=\epsilon,\qquad x_t=(1-t)\epsilon+tH_\star,\qquad u=H_\star-\epsilon,\\
+\mathcal L_{\rm flow}&=\mathbb E\left[\frac{1}{Cn^2}\|v_\theta(x_t,t,C_\star,U)-u\|_F^2\right].
+\end{align*}
+训练器用 float32 平均样本、通道和像素的平方误差，不裁剪训练状态。
+标准字只进入内容编码，参考字只进入风格编码；两者与主干共同反向训练。
+
+\subsection{作者风格损失}
+
+将 $U$ 整理为 $[B,N,Z,d]$。作者损失先对有效参考的同描述槽取均值：
+\[
+A_{i,z}=\frac{\sum_r m_{i,r}U_{i,r,z}}{\sum_r m_{i,r}},\qquad
+\bar A_{i,z}=\frac{A_{i,z}}{\max(\|A_{i,z}\|_2,10^{-8})},\qquad
+c_{ijz}=\bar A_{i,z}^{\top}\bar A_{j,z}.
+\]
+\textbf{这个均值只用于计算损失，主干依然读取全部 $NZ$ 个描述。}
+没有为作者损失增加可学习集合浓缩层。均值、归一化及相似度比较均在关闭 autocast 的 float32 上下文计算。
+设作者索引为 $a_i$，取当前 batch 的有序配对
+$P_s=\{(i,j):i\ne j,a_i=a_j\}$、$P_d=\{(i,j):a_i\ne a_j\}$：
+\begin{align*}
+\mathcal L_s&=\frac{1}{|P_s|Z}\sum_{(i,j)\in P_s}\sum_z(1-c_{ijz}),\\
+\mathcal L_d&=\frac{1}{|P_d|Z}\sum_{(i,j)\in P_d}\sum_z c_{ijz}^2,\\
+\mathcal L_{\rm author}&=\mathcal L_s+\mathcal L_d,\qquad
+\mathcal L_{\rm train}=\mathcal L_{\rm flow}+0.05\,\mathcal L_{\rm author}\quad\text{（默认）}.
+\end{align*}
+两类分别平均，再相加；缺少某类时对应项为保持梯度连接的零。单样本 batch 作者项为零。
+函数支持两类独立非负权重，默认均为 $1$；总作者项权重可在训练配置修改，$0$ 可关闭。
+同作者鼓励一致，异作者鼓励正交，相反方向不是零损失解。
+训练与验证均统计当前模型的双损失总目标，日志为 \code{train_loss} 和 \code{val_loss}。
+
+\subsection{为什么没有二次方、四次方的数据枚举}
+
+修改前的数据采样：每个 episode 独立均匀选作者，再从作者无放回抽 $N+1$ 个不同字符，
+首个为目标，余下为参考。旧作者损失比较集合浓缩后的固定槽，且只在当次 batch 内配对，
+没有跨 batch 缓存、专门保证同作者重复的采样，或对全部参考集合做组合枚举。
+修改后保留相同采样方式，只改为上述同槽均值表示。
+
+一个 batch 的作者出现次数为 $k_a$ 时，同作者有序对数为
+$\sum_a k_a(k_a-1)$，异作者为 $B(B-1)-\sum_a k_a(k_a-1)$。
+例如作者 $[a,a,b,c]$ 有 $2$ 个同作者、$10$ 个异作者有序对；两类各自取平均。
+均匀选择 $W$ 个作者时，同作者有序对的期望为 $B(B-1)/W$，一批完全没有同作者配对是可能的。
+全量枚举不同参考集合的配对空间可以很大，但代码只比较已抽到的 $B$ 个 episode，
+两类相似度计算都是 $O(B^2Zd)$，没有四次方枚举。异作者公式中的平方是余弦值平方，不是采样次数平方。
+
+\section{配置与采样}
+
+\begin{center}\small
 \begin{tabularx}{\linewidth}{@{}l l X@{}}
 \toprule
-符号 & 形状／含义 & 职责 \\
+模型字段 & 默认值 & 含义 \\
 \midrule
-$N$ & 参考对数量 & 随输入变化，至少为 $1$ \\
-$Z$ & 每组描述数量 & 单字证据容量，固定超参数 \\
-$M$ & 最终风格数量 & 整个参考集合的输出容量，固定超参数 \\
-$B_{\rm set}$ & 集合汇总层数 & 每层依次执行 CA、SA、FFN；代码默认 $2$，至少为 $1$ \\
-$X_i$ & $L\times d$ & 第 $i$ 组的初始 patch 特征 \\
-$R_i$ & $L\times d$ & 经过组内注意力的空间特征 \\
-$Q_Z$ & $Z\times d$ & 所有组共用的可学习压缩查询 \\
-$U_i$ & $Z\times d$ & 第 $i$ 组的语义描述 \\
-$U$ & $NZ\times d$ & 全部组描述沿行拼接，直接提供键和值 \\
-$Q_M$ & $M\times d$ & 可学习的集合汇总查询 \\
-$S$ & $M\times d$ & 最终风格条件 \\
-$T^{(b)}$ & $L\times d$ & 生成主干第 $b$ 层的目标特征 \\
-$x_t,\widehat v_t$ & $n\times n\times1$ & 当前生成状态、预测像素速度 \\
+\code{image_size / patch_size / in_channels} & $64/8/1$ & $L=64$，单通道 \\
+\code{hidden_size / num_heads / mlp_ratio} & $256/8/2$ & 每头 $32$，FFN 内宽 $512$ \\
+\code{local_depth / content_depth} & $8/8$ & 风格、内容 SA 深度独立 \\
+\code{generator_depth} & $8$ & 双 CA 主干深度 \\
+\code{description_tokens} & $24$ & 每字 $Z$ 个描述 \\
+\code{time_frequency_size / time_scale} & $256/1000$ & 时间编码维度与倍数 \\
 \bottomrule
-\end{tabularx}
-\end{center}
+\end{tabularx}\end{center}
+图像边长须整除 patch 边长，$d$ 可被头数和 $4$ 整除，时间特征维为正偶数，三个 SA 深度允许为 $0$。
+时间特征维默认在类定义时确定为 $256$，单独改 $d$ 不会自动同步。
+默认参数总数 $20{,}890{,}688$：参考 $4{,}767{,}232$，内容 $4{,}233{,}472$，主干 $11{,}889{,}984$。
 
-$Z$ 和 $M$ 都表示 token 数量，不表示特征维度；它们不必相等，也没有预设大小关系。
-$Q_Z,Q_M$ 是训练得到的模型参数，不是每次生成时重新采样的随机量。
-
-\section{参考分支：从成对字图到固定风格表示}
-
-\subsection{注意力块的具体约定}
-
-为使下文公式没有歧义，本文采用带残差、前置层归一化和前馈网络的注意力块。
-交叉注意力块 $\CA(A,B)$ 由 $A$ 提供查询，$B$ 提供键和值：
-\begin{align*}
-\widetilde A&=A+\MHA(\LN_A(A),\LN_B(B),\LN_B(B)),\\
-\CA(A,B)&=\widetilde A+\FFN(\LN_F(\widetilde A)).
-\end{align*}
-自注意力块 $\SA(A)$ 为
-\begin{align*}
-\widetilde A&=A+\MHA(\LN_A(A),\LN_A(A),\LN_A(A)),\\
-\SA(A)&=\widetilde A+\FFN(\LN_F(\widetilde A)).
-\end{align*}
-这里的 $\LN$ 是逐 token 的层归一化，不是 QKV 投影。
-$\MHA(X_Q,X_K,X_V)$ 的三个参数表示投影前的特征来源，
-模块内部再进行各头的 QKV 线性投影。以第 $h$ 个头为例，省略可选偏置：
-\begin{align*}
-Q_h&=X_QW_Q^{(h)},\qquad
-K_h=X_KW_K^{(h)},\qquad
-V_h=X_VW_V^{(h)},\\
-O_h&=\operatorname{softmax}\!\left(\frac{Q_hK_h^\top}{\sqrt{d_h}}\right)V_h,\\
-\MHA(X_Q,X_K,X_V)&=\operatorname{Concat}_h(O_h)W_O.
-\end{align*}
-$d_h$ 是每头维度，$W_O$ 是多头结果拼接后的输出投影。
-本稿的 $W_Q^{(h)},W_K^{(h)},W_V^{(h)}$ 分别参数化，不共享权重。
-因此自注意力中三个输入均为 $\LN_A(A)$，仅表示 Q、K、V 来自同一份特征，
-不施加投影后的 $Q_h=K_h=V_h$ 约束。
-同理，交叉注意力中键和值均来自 $\LN_B(B)$，也不表示 $K_h=V_h$。
-
-\textbf{与共享键值的区别：}在本稿所用的相同键值维度下，
-若将 K、V 投影及其偏置（如有）绑定，或直接令 $V_h=K_h$，
-才是显式约束投影后 $K=V$ 的另一种结构；本稿不采用该约束。
-上述 QKV 投影约定也适用于生成主干中的多头注意力。
-前馈网络暂用两层线性映射和 GELU；归一化仅沿特征维，不跨 token 或参考组。
-不同阶段、不同层拥有各自参数；只有明确说明的逐组操作共享参数。
-
-下文“注意力池化”采用 Set Transformer 的 PMA 思想：固定数量的可学习查询读取可变数量的输入。
-这里给出了本稿使用的具体块结构，不宣称逐项复现原论文的归一化和前馈配置。
-
-\subsection{阶段 A：组内分块与上下文编码}
-
-将一组 $H_i,K_i$ 沿通道拼接为 $n\times n\times2$。
-同位置的两个 $p\times p$ 小块一起展开，得到 $2p^2$ 维向量，再投影到 $d$ 维。
-这不是把手写和标准字混合平均，也不是分别产生两套无配对关系的 token。定义
-\[
-X_i=\operatorname{PatchEmbed}_{\mathrm{ref}}([H_i,K_i])+P_{xy}
-\in\R^{L\times d},\qquad
-R_i=E_{\mathrm{local}}(X_i).
-\]
-$P_{xy}\in\R^{L\times d}$ 为图内二维位置编码；暂用固定二维正弦余弦编码。
-$E_{\mathrm{local}}$ 由 $B_{\mathrm{local}}$ 层 $\SA$ 组成。
-每组的 $L$ 个 token 可以互相读取，但此阶段不读取其他参考组。
-所有组使用相同的分块投影、位置编码和编码器参数。
-
-这一阶段保留 $L$ 个空间位置。目的在于先获得带整字上下文的局部描述，为跨字比较提供依据；
-仅添加二维位置、然后直接把原始 patch 混合，不能完整表达哪些 patch 属于同一个字。
-组内编码也不保证自动学到可解释的笔画分类。
-
-\subsection{阶段 B：每组压缩为 \texorpdfstring{$Z$}{Z} 个语义描述}
-
-用同一套可学习查询 $Q_Z\in\R^{Z\times d}$ 独立读取各组：
-\[
-U_i=\CA_{\mathrm{local\ pool}}(Q_Z,R_i)\in\R^{Z\times d}.
-\]
-查询来自 $Q_Z$，键和值来自第 $i$ 组的 $R_i$。
-每个查询均可读取该组的全部 $L$ 个空间特征；输出位置对应查询槽位，不再对应固定图像块。
-各组之间共享 $Q_Z$ 和此注意力块的全部参数。
-
-本稿采用一次上述压缩，随后拼接各组描述，供 $M$ 个风格 token 在多层集合汇总中反复读取。
-压缩后的 $U_i$ 不再进行组内或跨组自注意力。
-压缩后不再保留 $R_i$ 到主干或最终池化的旁路，因而 $Z$ 是真实的信息瓶颈。
-
-相同查询槽位为跨字描述提供共同的学习起点，但不强制语义完全对齐。
-例如不能预先断言“第一个 token 永远表示横画”。
-这里的 $U_i$ 是来自单字的证据：有些写法在该字中没有出现，模型需要在后续集合融合中结合其他字。
-压缩不会自动实现内容与风格的严格解耦，也不要求每个描述能独立解释。
-
-\subsection{阶段 C：多层 CA--SA--FFN 汇总为 \texorpdfstring{$M$}{M} 个风格 token}
-
-将各组描述沿 token 维拼接，作为每个集合汇总层的固定键值来源：
-\[
-U=[U_1;\ldots;U_N]\in\R^{NZ\times d},\qquad
-S^{(0)}=Q_M\in\R^{M\times d}.
-\]
-设集合汇总深度为 $B_{\rm set}\geq1$，当前代码默认 $B_{\rm set}=2$。第 $b$ 层先由当前风格 token 读取 $U$，
-再在 $M$ 个风格 token 之间进行自注意力，最后执行逐 token 前馈网络：
-\begin{align*}
-C^{(b)}={}&S^{(b)}+\MHA_{\rm ca}^{(b)}\!\left(
-  \LN_q^{(b)}(S^{(b)}),\LN_u^{(b)}(U),\LN_u^{(b)}(U)\right),\\
-A^{(b)}={}&C^{(b)}+\MHA_{\rm sa}^{(b)}\!\left(
-  \LN_s^{(b)}(C^{(b)}),\LN_s^{(b)}(C^{(b)}),\LN_s^{(b)}(C^{(b)})\right),\\
-S^{(b+1)}={}&A^{(b)}+\FFN^{(b)}\!\left(\LN_f^{(b)}(A^{(b)})\right),
-\qquad b=0,\ldots,B_{\rm set}-1,\\
-S={}&S^{(B_{\rm set})}.
-\end{align*}
-每层拥有独立的 CA、SA、FFN 和归一化参数。CA 的单头注意力矩阵形状为
-$M\times NZ$，SA 的注意力矩阵形状为 $M\times M$。
-第一层查询由可学习参数 $Q_M$ 初始化；后续层查询是上一层已经融合参考信息的风格 token。
-
-拼接只是键值输入的整理，不含可学习参数，也不构成独立编码阶段。
-\textbf{$U$ 不进行自注意力，也不在集合汇总中被更新；每层 CA 都读取同一份 $U$。}
-这里的“不更新 $U$”指前向计算中的信息流；训练梯度仍可通过每层键值分支回传至逐组编码器。
-补齐参考产生的描述在每一层 CA 中使用相同的键值掩码。
-$Q_M$ 与 $Q_Z$ 是不同的参数集合，即使 $M=Z$ 也不共享。
-
-汇总时不添加参考组序号、拼接后的绝对序列位置或新的空间网格位置。
-组内空间与上下文信息可以存在于描述内容中，但查询不再显式访问原始分组关系。
-这沿用阶段 B 的假设：压缩描述应足以支持内容驱动的集合汇总。
-
-$S$ 表示对整个参考集合的风格总结；其行数与 $N$ 无关，但数值内容依赖全部有效参考。
-$M$ 是表示容量，不等于预先定义的中文风格属性数量。
-参考分支只依赖 $\mathcal C$，不依赖目标字 $K_\star$、时间 $t$ 或当前状态 $x_t$。
-因此同一组参考的 $S$ 可以在多个目标字和各 flow 步之间复用。
-训练时不截断其梯度，参考分支与生成主干联合优化；训练更新后缓存需重新计算。
-
-\section{参考顺序无关性与可变数量输入}
-
-本任务要求参考对整体重排不改变输出；不允许仅重排 $H_i$ 或仅重排 $K_i$。
-逐组编码与压缩使用共享参数，因此组重排只会重排 $U$ 的整组行，得到 $U'=PU$。
-由于键值投影与归一化均逐 token 进行，对应有 $K'=PK$、$V'=PV$。
-任意固定查询对键和值的同步重排不变。以单头为例，
-\[
-\operatorname{softmax}\!\left(\frac{Q(PK)^\top}{\sqrt{d_h}}\right)PV
-=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
-\]
-第一层 CA 因而对参考重排不变；其后的 $M$ token 自注意力、逐 token 前馈网络和残差也不引入参考顺序。
-以此逐层归纳，后续 CA 的查询同样不随参考重排变化，所以最终 $S$ 不变。
-固定初始噪声和积分设置后，生成结果也不变，允许浮点计算误差。
-本稿暂不使用 dropout；若以后引入随机操作，需区分确定性推理与随机训练中的性质。
-
-批处理中不同样本可以有不同 $N$。补齐参考组产生的全部 $Z$ 个描述必须在最终交叉注意力中作为无效键值屏蔽。
-$M$ 个查询均有效，但不得读取这些补齐 token。
-应避免给一个查询构造全部键均不可见的 softmax。
-$N=1$ 时，$M$ 个查询直接读取唯一一组的 $Z$ 个描述，不需要特殊的跨组退化处理。
-
-\section{生成主干与 flow 起点}
-
-\subsection{目标 patch 与主干结构}
-
-采用带风格交叉注意力的 DiT 主干。在每个时刻，仅将当前单通道图像 $x_t$ 分块并投影：
-\[
-T^{(0)}=\operatorname{PatchEmbed}_{\mathrm{gen}}(x_t)+P_{xy}
-\in\R^{L\times d}.
-\]
-每个目标块的输入为 $p^2$ 维，投影为 $d$ 维；主干始终保留 $L=(n/p)^2$ 个空间 token。
-目标标准字 $K_\star$ 仅参与构造起点 $x_0$，不再独立输入速度网络。
-参考分支仍将 $H_i,K_i$ 成对拼接，参考分支与目标分支的分块投影不共享参数。
-每个 block 依次执行目标自注意力 SA、读取 $S$ 的交叉注意力 CA，以及逐 token FFN。
-此处 SA、CA 表示独立的注意力子层，FFN 单独列出；不重复套用参考分支中包含 FFN 的复合块定义。
-
-\textbf{时间调节只施加于 SA、FFN，以及输出头。}
-SA 与 FFN 沿用原始 DiT 的 AdaLN-Zero 配置；新增 CA 采用普通前置 LN 与残差，
-不另外生成时间缩放、偏移或门控。不同 block 各自将同一个 $S$ 投影成键和值。
-CA 的查询来自已经受时间影响的主干特征，因此仍然能够随 $t$ 改变读取方式。
-
-\subsection{时间输入：标准 AdaLN-Zero 与普通 CA}
-
-连续时间 $t\in[0,1]$ 经正弦余弦编码及两层线性映射（中间使用 SiLU）得到共享的
-$e(t)\in\R^d$。编码的时间尺度在训练与推理时保持一致；$t$ 表示流的位置，不是积分步号或步长。
-每个 block 使用自己的一次映射：
-\[
-(a_s,b_s,g_s,a_f,b_f,g_f)
-=\operatorname{Split}_6\!\left(
-W_{\mathrm{mod}}^{(b)}\operatorname{SiLU}(e(t))+c_{\mathrm{mod}}^{(b)}
-\right),
-\qquad W_{\mathrm{mod}}^{(b)}:\R^d\to\R^{6d}.
-\]
-下标 $s,f$ 分别表示 SA 与 FFN。六个向量均为 $d$ 维，在该样本的全部 $L$ 个 token 间广播；
-不同 block 使用不同参数，同一 block 内通过一个线性层一次性生成六组输出。
-定义
-\[
-D_j(T,t)=(1+a_j(t))\odot\LN_j(T)+b_j(t),\qquad j\in\{s,f\}.
-\]
-受时间调节的 LN 不再带自身的可学习仿射参数。一个 block 的完整更新为
-\begin{align*}
-A &= D_s(T,t),\\
-T_s &= T+g_s(t)\odot\MHA_s(A,A,A),\\
-T_c &= T_s+\MHA_c\!\left(\LN_q(T_s),\LN_{kv}(S),\LN_{kv}(S)\right),\\
-T^+ &= T_c+g_f(t)\odot\FFN\!\left(D_f(T_c,t)\right).
-\end{align*}
-CA 中的 Q、K、V 投影仍然彼此独立；注意力矩阵为 $L\times M$。
-主干不直接读取 $R_i$ 或 $U_i$，参考表示 $S$ 本身不接受时间调节。
-
-$W_{\mathrm{mod}}^{(b)}$ 及其偏置零初始化，因此 SA、FFN 的缩放增量、偏移与残差门初始均为零；
-门控向量通过训练学习，不使用额外 sigmoid。新增 CA 保留普通残差，不引入额外零门，
-所以此扩展 block 整体不保证初始恒等；AdaLN-Zero 的零残差初始化作用于 SA、FFN 两个分支。
-
-输出头另用 $\operatorname{SiLU}+\operatorname{Linear}(d,2d)$ 生成 $(a_{\rm out},b_{\rm out})$，
-对最终 $L\times d$ 特征做时间调节的归一化，再用所有 token 共用的线性层 $d\to p^2$：
-\[
-L\times d
-\ \xrightarrow{\text{时间调节 LN + 共享线性层}}\
-L\times p^2
-\ \xrightarrow{\text{按原二维位置拼回}}\
-\widehat v_t\in\R^{n\times n\times1}.
-\]
-沿用原始 DiT 的输出头初始化，时间调节映射与最终 patch 线性映射均零初始化。
-输出矩阵只有 $d\times p^2$ 个权重，不随 $L$ 增长；不存在把整图压成一个 token 后再解码的步骤。
-输出是当前灰度状态的像素速度，而不是最终字图；速度网络记作 $v_\theta(x_t,t,S)$，输入与输出图像均为单通道。
-
-\subsection{训练路径：标准字加噪声到手写真值}
-
-本稿暂在像素空间定义 flow，不额外引入图像自编码器。
-主干内部的 patch 特征不是独立的生成状态；若将来改为 latent flow，需另行定义共同编码空间与解码器。
-
-取固定实验超参数 $\sigma\geq0$（默认 $0.1$），独立采样 $\epsilon\sim\mathcal N(0,I)$ 和 $t\sim\mathcal U(0,1)$，定义
-\begin{align*}
-x_0&=K_\star+\sigma\epsilon,\\
-x_t&=(1-t)x_0+tH_\star,\\
-u&=H_\star-x_0,\\
-\mathcal L_{\rm flow}&=\mathbb E\left[\frac{1}{n^2}
-\left\|v_\theta(x_t,t,S)-u\right\|_F^2\right].
-\end{align*}
-同一个 $x_0$ 同时用于构造 $x_t$ 和监督速度 $u$。
-目标标准字 $K_\star$ 通过起点及训练状态影响速度预测，不作为独立通道提供；$H_\star$ 仅通过训练状态与监督目标参与训练。
-参考分支的所有可学习查询、编码器和生成主干均由 flow 损失联合训练。
-训练器还默认加入作者风格损失，完整目标见下一小节；当前没有笔画标注或图像重建损失。
-
-这里的加噪是以标准字为均值的加性高斯扰动，不是把图像与噪声做权重和为 $1$ 的混合。
-$x_0$ 可能超出 $[-1,1]$；训练状态和积分中间状态均不裁剪。
-训练和推理必须使用相同的起点分布；不能仅在推理时替换纯噪声起点。
-当前像素线性插值定义的是训练路径，不保证中间状态是自然字形，也不把 $t$ 定义为手写风格强度。
-
-\subsection{作者风格损失与训练、验证口径}
-
-\texttt{author\_style\_loss} 比较一个微批次内不同样本的固定风格槽位。
-设第 $i$ 个样本的作者索引为 $a_i$，其第 $m$ 个风格 token 为 $S_{i,m}$。
-先转为 float32，并沿特征维进行 L2 归一化：
-\[
-\bar S_{i,m}=\frac{S_{i,m}}{\max(\|S_{i,m}\|_2,10^{-8})},\qquad
-c_{ijm}=\bar S_{i,m}^{\top}\bar S_{j,m}.
-\]
-定义有序配对集合 $P_s=\{(i,j):i\ne j,a_i=a_j\}$ 和
-$P_d=\{(i,j):a_i\ne a_j\}$，分别取平均：
-\begin{align*}
-\mathcal L_s&=\frac{1}{|P_s|M}\sum_{(i,j)\in P_s}\sum_m(1-c_{ijm}),\\
-\mathcal L_d&=\frac{1}{|P_d|M}\sum_{(i,j)\in P_d}\sum_m c_{ijm}^{\,2},\\
-\mathcal L_{\rm author}&=\mathcal L_s+\mathcal L_d,\\
-\mathcal L_{\rm train}&=\mathcal L_{\rm flow}+\lambda\mathcal L_{\rm author},
-\qquad\lambda=0.05\ \text{（默认）}.
-\end{align*}
-空配对集合对应项取保持梯度连接的零，不做除零；单样本批次作者项为零。
-函数还接受同作者、异作者项的独立非负权重，默认均为 $1$，训练器采用默认值。
-同作者项鼓励一致，异作者项鼓励同槽方向正交，不能把相反方向当作零损失解。
-作者项不保证内容与风格严格解耦，参考采样也不保证每个 batch 都有同作者配对。
-配对仅在每个微批次内部进行，梯度累积不增加配对范围；设
-\texttt{author\_style\_loss\_weight=0} 可关闭这一项。
-
-一个微批次只编码一次风格，同时用于速度预测和作者项。
-训练 MSE 以 float32 计算；作者 token 的归一化使用 float32，注意力和相似度运算仍受当前 autocast 上下文影响。
-EMA 模型在挂载训练专用作者权重之前复制，因此
-\texttt{train\_loss} 为上述总目标，而 \texttt{val\_loss\_ema} 只统计 EMA 的 flow MSE。
-最优检查点依据后者选择，不能把两个指标当作完全相同的损失口径。
-
-\subsection{推理与随机性}
-
-先计算 $S$，再采样 $x_0=K_\star+\sigma\epsilon$，固定 $S$ 并求解
-\[
-\frac{dx_t}{dt}=v_\theta(x_t,t,S),\qquad t:0\longrightarrow1.
-\]
-暂采用 $J$ 步等步长 Euler 积分：
-\[
-t_j=j/J,\qquad x_{t_{j+1}}=x_{t_j}+\frac1Jv_\theta(x_{t_j},t_j,S).
-\]
-\texttt{sample\_euler} 在 \texttt{no\_grad} 下仅在最后把 $x_1$ 裁剪至 $[-1,1]$，
-返回归一化图像张量；灰度映射由预览函数或调用方完成，得到 $\widehat H_\star$。
-除初始噪声外，生成过程不引入额外随机量。
-各步只能从当前状态读取目标字信息，不再额外读取干净目标标准字。
-生成输入层由双通道改为单通道；旧版双通道检查点不能直接续训，当前训练检查点版本为 $2$。
-
-当参考、目标和噪声固定时，输出确定。$\sigma=0$ 可另作确定性迁移对照，
-但同一条件下的确定性 ODE 无法产生多个不同写法。
-更大 $\sigma$ 不自动意味着更多合理变化；若需要推理时可调的噪声强度，
-应另行设计覆盖不同强度的训练和相应条件输入。采样函数允许显式传入 \texttt{noise} 和覆盖 \texttt{sigma}，
-但覆盖只改变起点，模型没有噪声强度条件输入，也没有保证不同强度下的生成效果。
-
-\section{计算成本与压缩的实际含义}
-
-以下仅统计注意力中计算权重与加权求和的主要项，并将重复层数显式写出；忽略常数。
-投影和前馈网络的成本通常还包含“token 数量乘 $d^2$”的项。
-
-\begin{center}
-\small
-\begin{tabularx}{\linewidth}{@{}X l@{}}
-\toprule
-操作 & 主要注意力成本 \\
-\midrule
-$N$ 组分别进行 $L$ 个 patch 的自注意力 & $O(NL^2d)$ \\
-每组用 $Z$ 个查询读取 $L$ 个特征 & $O(NZLd)$ \\
-$B_{\rm set}$ 个集合汇总层：CA 读取 $NZ$ 个描述并对 $M$ 个 token 做 SA
-  & $O\!\left(B_{\rm set}(MNZ+M^2)d\right)$ \\
-一个主干层的目标自注意力 & $O(L^2d)$ \\
-一个主干层读取风格条件 & $O(LMd)$ \\
-\bottomrule
-\end{tabularx}
-\end{center}
-
-计入参考分支的实际层数，本稿默认结构的主要注意力成本为
-\[
-O\!\left(B_{\mathrm{local}}NL^2d+NZLd
-+B_{\rm set}(MNZ+M^2)d\right).
-\]
-参考描述不做全局自注意力，故不包含 $O(N^2Z^2d)$ 或 $O((Nq^2)^2d)$ 的计算项；
-新增自注意力只发生在固定数量的 $M$ 个风格 token 上。
-固定 $L,Z,M,d,B_{\rm local},B_{\rm set}$ 时，参考分支的上述计算成本仍随 $N$ 线性增长。
-若不做逐组压缩，而让每层的 $M$ 个查询直接读取全部 $NL$ 个组内特征，
-集合 CA 成本为 $O(B_{\rm set}MNLd)$。
-压缩后单层及全部层的 CA 读取项之比均为 $Z/L$；例如 $L=256,Z=16$ 时，该项变为 $1/16$。
-这一比较不包含新增的逐组压缩成本，不能据此宣称整个参考分支加速 $16$ 倍。
-
-参考编码不在 flow 积分循环内重复执行；相同参考可复用其输出。
-若主干有 $B_{\mathrm{gen}}$ 层、采样有 $J$ 步，其注意力成本约为
-$O(JB_{\mathrm{gen}}(L^2+LM)d)$。
-实际训练显存和时间还取决于批量大小、反向传播、前馈宽度与注意力实现。
-FlashAttention 可降低中间矩阵的显存开销；代码调用 PyTorch 的多头注意力，具体后端取决于设备、版本和精度，
-不保证始终使用 FlashAttention。本版关于 $N$ 的线性计算规模来自结构本身。
-实际 batch 将参考补齐至最大槽数，补齐组仍参加逐组编码，计算成本应按槽数而非仅有效参考数估算。
-采样只缓存风格 token；主干每步仍计算各层的风格 LN 与 K/V 投影，没有 K/V cache。
-
-压缩的代价同样明确：某种少见笔画或部件证据若在生成 $U_i$ 时已经丢失，
-后续 $M$ 个查询只能利用保留下来的信息，不能通过重新读取 $R_i$ 找回它。
-因此 $Z$ 控制单字证据容量，$M$ 控制集合汇总宽度，$B_{\rm set}$ 控制反复读取和风格 token 交互的深度，三者应分别考察。
-
-
-\section{默认配置与数值实现}
-
-\subsection{模型参数}
-
-当前模型使用通道在前的 PyTorch 张量。参考为 $[B,N,C,n,n]$，
-流状态和速度为 $[B,C,n,n]$，时间为 $[B]$，风格为 $[B,M,d]$。
-数据与训练器只支持灰度 $C=1$；底层模型可按配置构造其他通道数。
-
-\begin{center}
-\small
+\begin{center}\small
 \begin{tabularx}{\linewidth}{@{}l l X@{}}
 \toprule
-\texttt{ModelConfig} 字段 & 默认值 & 含义 \\
+训练字段 & 默认值 & 含义 \\
 \midrule
-\texttt{image\_size / patch\_size} & $64/8$ & $q=8,L=64$ \\
-\texttt{in\_channels} & $1$ & 参考拼接为两通道，主干为单通道 \\
-\texttt{hidden\_size / num\_heads} & $256/8$ & 每头维度 $32$ \\
-\texttt{mlp\_ratio} & $4.0$ & FFN 中间维度 $1024$ \\
-\texttt{local\_depth} & $4$ & 逐组 SA--FFN 层数 \\
-\texttt{set\_pool\_depth} & $2$ & 集合 CA--SA--FFN 层数 \\
-\texttt{generator\_depth} & $8$ & 主干层数 \\
-\texttt{description\_tokens} & $32$ & 每组描述数 $Z$ \\
-\texttt{style\_tokens} & $32$ & 风格槽数 $M$ \\
-\texttt{time\_frequency\_size} & $256$ & 时间 Fourier 特征维数 \\
-\texttt{time\_scale} & $1000$ & 编码前将连续时间放大 \\
-\texttt{sigma} & $0.1$ & 加性高斯噪声强度，允许 $0$ \\
+\code{steps / batch_size} & $100000/64$ & 每 batch 一次优化器更新 \\
+\code{min_references / max_references} & $4/4$ & 默认 $NZ=96$；可设数量范围 \\
+\code{learning_rate / min_lr_ratio} & $10^{-4}/0.1$ & 基础 LR 与最终比例 \\
+\code{warmup_steps} & $1000$ & 线性预热后余弦衰减 \\
+\code{weight_decay / gradient_clip} & $0.01/1$ & AdamW 衰减与全局 L2 阈值 \\
+\code{author_style_loss_weight} & $0.05$ & 作者项权重 \\
+\code{precision / preload_to_gpu / workers} & BF16 / False / $8$ & 精度与数据存放方式 \\
+\code{val_batches / validate_every} & $16/1000$ & 验证批数与间隔 \\
+\code{save_every / log_every} & $500/50$ & 保存与日志间隔 \\
+\code{sample_steps / seed} & $32/42$ & 预览 Euler 步数与种子 \\
 \bottomrule
-\end{tabularx}
-\end{center}
+\end{tabularx}\end{center}
+新训练读取 \code{src/config.py}，AdamW betas 为 $(0.9,0.95)$，全部参数同组衰减。
 
-分块使用带 bias 的 \texttt{Conv2d}，kernel 和 stride 均为 $p$。
-图像边长需可被 $p$ 整除，$d$ 可被头数和 $4$ 整除；时间特征维需为正偶数。
-集合层数至少为 $1$，逐组及主干层数允许为 $0$。
-默认模型全部可学习参数为 $17{,}984{,}320$，其中参考编码器
-$6{,}106{,}624$，生成主干 $11{,}877{,}696$。
-\texttt{count\_parameters.py} 可用模型字段的 kebab-case 选项单独统计其他结构，不改变训练配置。
+CUDA 支持 FP32、BF16、FP16 并启用 TF32；CPU 实际为 FP32，只有 FP16 启用 GradScaler。
+先反缩放、诊断和裁剪梯度，再更新参数；范数归约非有限时以 float64 重算。
+真实异常梯度不更新参数：FP16 降低 scale 并复用同一 batch/时间/噪声，最多尝试 $16$ 次；
+BF16/FP32 或非有限损失直接停止，保留成功保存的检查点。
 
-二维位置按行、列各占 $d/2$ 维，每轴拼接 sin、cos；时间编码拼接 cos、sin。
-频率均以 $10000$ 为周期基数。时间编码第 $k$ 个频率为
+采样时先计算 $C_\star,U$，从 $x_0\sim\mathcal N(0,I)$ 出发，$J$ 步 Euler：
 \[
-f_k=\exp\!\left(-\log(10000)\frac{k}{F/2}\right),\qquad
-e_{\rm raw}(t)=[\cos(t\,\tau f_k);\sin(t\,\tau f_k)],
+t_j=j/J,\qquad x_{j+1}=x_j+J^{-1}v_\theta(x_j,t_j,C_\star,U),\quad j=0,\ldots,J-1.
 \]
-其中 $F$ 为 \texttt{time\_frequency\_size}，$\tau$ 为 \texttt{time\_scale}。
+只在返回时裁剪 $[-1,1]$，灰度映射由调用方完成。可提供固定 noise 复现实验。
+没有额外随机积分量；内容和风格每次采样各编码一次，主干每步仍重算各层 memory LN/K/V，没有 K/V cache。
 
-位置与时间频率为非持久化 buffer，不写入 \texttt{state\_dict}。
-时间特征维的默认值在类定义时确定为 $256$，单独修改 $d$ 不会自动修改 $F$。
+\section{数据、验证与恢复}
 
-全部注意力为 batch-first 的 \texttt{nn.MultiheadAttention}，dropout 为 $0$，
-Q/K/V 独立投影并带 bias，调用时不返回注意力权重。
-普通 LN 带可学习仿射，$\varepsilon=10^{-5}$；AdaLN 用无仿射 LN，$\varepsilon=10^{-6}$。
-FFN 内宽为 $\lfloor d\cdot\texttt{mlp\_ratio}\rfloor$，激活为 GELU。
-$Q_Z,Q_M$ 独立以标准差 $0.02$ 的正态分布初始化；参考输出没有额外末尾 LN。
-时间调制层和最终速度投影零初始化，其余层采用 PyTorch 默认初始化。
-最终投影为零意味着初始速度为零，不能据此将包含普通 CA 的整个主干块视为恒等映射。
+从 \code{DiT-flow/} 运行 \code{python -m src.prepare_data}，必填 GNT 根目录、字体和输出路径。
+默认边长 $64$、边距 $4$、字体索引 $0$、最少字符数 $5$、验证比例 $0.1$、种子 $42$。
+每个 GNT 文件视为作者，文件 stem 是 ID，要求至少两个文件且 ID 不重复；数值字段小端、标签按 GBK 解码。
+保留字体支持的基本 CJK 单字，去除重复、空白与字符数不足作者；损坏记录直接报错。
+手写和标准字紧裁白背景、保持宽高比、LANCZOS 缩放居中，无随机图像增强。
+只应提供训练集文件，代码不自动识别官方 Test 文件。
 
-\subsection{训练参数}
+按作者划分 train/val，验证人数为 $\min(W-1,\max(1,\operatorname{round}(0.1W)))$（默认比例）。
+作者不重叠，字符类别可以重叠；保存 uint8 NPY 和最后写入的版本 $1$ manifest。
+训练和验证全部字图预加载一份：CPU 使用 RawArray 供 worker 共享；CUDA 常驻则强制 worker 为 $0$。
+episode 独立随机数由种子与全局索引确定，续训从 saved step 乘 batch size 继续索引，验证用 seed 加一的固定 episode。
+每字图转为 pixel/127.5-1，参考补白并附掩码和稳定作者索引；不再返回参考标准字。
+数据指纹为 manifest 原始字节 SHA-256，不重新核验记录的 NPY/字体内容哈希。
+旧预处理数据满足尺寸及最大参考数加一个不同字符时可复用。
 
-\begin{center}
-\small
-\begin{tabularx}{\linewidth}{@{}l l X@{}}
-\toprule
-\texttt{TrainingConfig} 字段 & 默认值 & 含义 \\
-\midrule
-\texttt{steps} & $100000$ & 优化器总步数 \\
-\texttt{batch\_size / accumulation\_steps} & $64/1$ & 微批量 / 累积次数 \\
-\texttt{min\_references / max\_references} & $1/16$ & 参考数均匀整数采样范围 \\
-\texttt{learning\_rate} & $10^{-4}$ & 基础学习率 \\
-\texttt{min\_lr\_ratio / warmup\_steps} & $0.1/1000$ & 最低比例 / 预热步数 \\
-\texttt{weight\_decay / gradient\_clip} & $0.01/1.0$ & 权重衰减 / 全局 L2 阈值 \\
-\texttt{ema\_decay} & $0.999$ & EMA 衰减 \\
-\texttt{author\_style\_loss\_weight} & $0.05$ & 作者项权重 \\
-\texttt{precision} & \texttt{bf16} & CUDA 默认精度 \\
-\texttt{preload\_to\_gpu / workers} & \texttt{False} / $8$ & 字图常驻显存 / 训练 worker 数 \\
-\texttt{val\_batches / validate\_every} & $16/1000$ & 验证批次 / 间隔 \\
-\texttt{save\_every / log\_every} & $500/50$ & 保存 / 日志间隔 \\
-\texttt{sample\_steps / seed} & $32/42$ & 预览 Euler 步数 / 种子 \\
-\bottomrule
-\end{tabularx}
-\end{center}
+验证每隔固定间隔及计划末步进行，使用当前模型双损失与预览，结束恢复 train/eval 状态。
+隔离 RNG、使用 seed 加 $10000$ 固定时间/噪声，全部损失算完再采样预览。
+\code{--stop-after} 是绝对优化器步数，不改 LR 总日程。训练循环响应 SIGINT/SIGTERM：
+完成当前更新后跳过验证并保存 last；强杀或一般异常不保证保存当前步。
 
-新训练直接读取 \texttt{src/config.py}，不读取额外配置文件；
-有效批量为微批量乘累积次数，每个微批损失除以累积次数后反向。
-训练使用 AdamW，betas 为 $(0.9,0.95)$，全部参数在同一组内进行权重衰减。
-学习率按从 $1$ 开始的优化器步数线性预热，再余弦衰减至基础值的最低比例。
-\texttt{--stop-after} 只提前停在绝对步数，不改变总日程。
-CUDA 支持 BF16/FP16/FP32 并启用 TF32；CPU 实际使用 FP32，只有 FP16 启用 GradScaler。
+检查点版本为 \textbf{3}，仅保存当前模型、AdamW、GradScaler、PyTorch RNG、配置、数据指纹、步数和最优验证值。
+版本 $1/2$ 架构不兼容，在写输出前拒绝恢复；使用新目录重新训练。
+best 在当前模型验证总目标严格改善时保存；last 按间隔及结束保存，可能落后于内存当前步。
+恢复采用保存超参数，运行开关 \code{preload_to_gpu} 读取当前配置，设备、worker 与提前终点可由命令行指定。
+新训练拒绝非空结果；续训旧目录配置/指纹须一致，且已有 last 不得比选中恢复点新。
+保存先写临时文件、flush/fsync 再替换；I/O 错误最多三次尝试，间隔 $1$、$2$ 秒，不重复训练。
+刷新 best 与 last 不是整体事务，存储需额外一份完整检查点空间。
 
-\section{数据准备、划分与确定性采样}
+\section{计算规模与验证边界}
 
-从 \texttt{DiT-flow/} 内运行 \texttt{python -m src.prepare\_data}，
-必填参数为 \texttt{--gnt-root}、\texttt{--font}、\texttt{--output}。
-可选默认值为字体索引 $0$、图像边长 $64$、边距 $4$、最少字符数 $17$、
-验证比例 $0.1$、种子 $42$；其中边长读取模型默认值，最少字符数为默认最大参考数加一。
-输出目录必须新建或为空，代码不自动区分官方训练/Test 文件。
-
-递归排序读取 GNT，每个文件视为一个作者，文件 stem 为 ID，要求至少两个文件且 ID 不重复。
-GNT 数值字段按小端解析，两个原始标签字节按 GBK 解码；截断、非法记录尺寸或标签直接报错。
-保留基本 CJK 范围 U+4E00--U+9FFF 内的单字，并用字体 cmap 排除缺字；
-每位作者每个字符仅保留首次成功处理的图像，空白及字符数不足作者计入跳过统计。
-手写和标准图分别紧裁白背景、保持宽高比，用 LANCZOS 缩放并在白色方形中居中。
-标准图先以四倍目标边长的字号渲染；默认预处理没有随机图像增强。
-
-按作者用独立种子打乱后划分 train/val。作者数为 $W$ 时，验证作者数为
-\[
-\min\bigl(W-1,\max(1,\operatorname{round}(W\cdot\texttt{val\_fraction}))\bigr).
-\]
-作者不跨集合，但同一字符类别可以在两侧出现。
-输出为 uint8 的作者 NPY、标准字 NPY，以及最后写入的 \texttt{manifest.json} 完成标志。
-数据格式版本为 $1$，与训练检查点版本 $2$ 是不同概念。
-manifest 记录字符索引、作者文件/标签/划分、尺寸、边距、字体和像素文件哈希、种子及跳过统计。
-
-训练启动逐作者加载全部 train/val 像素，只保留一份 uint8 字图。
-CPU 使用 \texttt{RawArray}，fork/spawn worker 和训练/验证共享存储；采样不再读取 NPY。
-像素占用为 $(\text{手写数}+\text{标准数})n^2$ 字节，不含模型与浮点批次。
-显存预加载只允许 CUDA，并强制训练 worker 为 $0$。
-
-每个 episode 用 \texttt{random.Random(f"\{seed\}:\{index\}")} 独立采样：
-均匀选作者、均匀选参考数，再无放回选择 $N+1$ 个不同字符，首个作为目标。
-像素转为 $\texttt{pixel}/127.5-1$，即白 $+1$、黑 $-1$；
-参考补至最大槽数，补齐值为白色，并提供布尔有效掩码和稳定的 manifest 作者索引。
-至少需要最大参考数加一个不同字符；按作者均匀抽样不等于按全部字图均匀抽样。
-掩码省略时全部槽位有效，每个样本至少一个有效槽位；应使用有限数值填充补齐图像。
-
-episode 仅由索引和种子决定，不受 worker 数和预取进度影响。
-续训从已完成步数乘有效批量继续全局索引；验证使用固定索引和训练种子加一。
-数据指纹为 manifest 原始字节的 SHA-256，空白变化也会导致续训拒绝。
-加载器校验 NPY 的 dtype/shape 和标签索引，但不重新核验记录的 NPY/字体内容哈希。
-
-\section{验证、诊断与检查点恢复}
-
-\subsection{EMA、验证和退出}
-
-每次成功优化器更新后，EMA 参数按
-$\theta_{\rm ema}\leftarrow\rho\theta_{\rm ema}+(1-\rho)\theta$ 更新。
-每隔验证间隔及计划结束步使用 EMA 做验证与预览；正常提前结束也验证。
-验证用隔离的 PyTorch RNG 和训练种子加 $10000$ 固定时间/噪声，按样本数平均 flow MSE。
-预览在全部验证损失之后采样，展示第一批最多四个样本的所有参考槽、标准字、真值和生成图。
-验证 worker 固定为 $0$；更改设备或精度不保证跨设备逐位一致。
-
-训练循环接收 SIGINT/SIGTERM 后完成当前优化器步、跳过该步验证，并保存最近状态。
-强杀或一般运行异常不会额外保存故障当前步，只保留已成功写入的检查点。
-
-\subsection{梯度与日志}
-
-AMP 反缩放后记录裁剪前全局 L2 范数，再安全裁剪；
-float32 范数归约出现非有限值时用 float64 重算，区分归约溢出与真实异常梯度。
-真实异常梯度不更新参数：FP16 降低 scale 并复用相同数据、时间与噪声，最多尝试 $16$ 次；
-BF16/FP32 直接报错停止，非有限损失也立即停止。
-诊断在启动/续训首步、日志间隔、计划结束步及异常/float64 回退时记录，
-包括最大的八个参数及直接所属模块、最大元素、裁剪比例、AMP scale、尝试序号和异常参数名。
-模块排行不是整个参考分支或主干的递归总范数；Inf/NaN 用字符串保存为合法 JSON。
-
-\texttt{metrics.jsonl} 追加训练总损失、学习率、原始梯度范数、裁剪乘数及可选 EMA 验证损失。
-普通数字保留八位小数，极大/极小数使用科学计数法；
-耗时为带秒单位字符串，CUDA 峰值显存为带 \texttt{GB} 字符串，但分母是 $1024^3$，实际单位为 GiB。
-显存字段来自 \texttt{max\_memory\_allocated}，不是 reserved memory 或单步独立峰值。
-\texttt{run.json} 记录设置、数据指纹、设备、实际精度、torch 版本与运行预加载方式，续训时重写。
-
-\subsection{保存与续训}
-
-从 \texttt{DiT-flow/} 内运行 \texttt{python -m src.train}。
-必填参数为 \texttt{--data}、\texttt{--output}。
-
-可选参数为 \texttt{--resume}、\texttt{--device}、\texttt{--workers}、\texttt{--stop-after}。
-设备默认 \texttt{auto}，选择 CUDA 或 CPU，支持显式 CUDA 索引。
-仅支持 CPU 或单张 CUDA，没有分布式入口。训练文件也支持从仓库根目录按文件路径启动，参数路径相对工作目录。
-
-检查点版本 $2$ 保存模型和 EMA 两套权重、AdamW、GradScaler、CPU/选定 CUDA 的 RNG、
-模型/训练配置、数据指纹、已完成步数和最优验证值。
-\texttt{best.pt} 在 EMA flow 验证严格改善时写入，也含完整训练状态；
-\texttt{last.pt} 按保存间隔及正常结束/响应退出请求写入，可能落后于当前内存步数。
-恢复旧版双通道版本 $1$ 会在输出写入前报错；已准备的灰度数据可以复用。
-
-续训采用保存的模型和训练超参数，仅运行开关 \texttt{preload\_to\_gpu} 始终读取当前配置，
-不写入检查点 settings；设备、worker 数、提前结束步也可通过命令行改动。
-保存步数必须小于本次终点，不能用提前结束选项延长保存的总日程。
-新运行拒绝已有结果，只允许配置/指纹一致、仅有启动元数据和空预览目录的启动重试。
-续训可使用新目录；原非空目录须有一致元数据，且 \texttt{last.pt} 不能比恢复点更新。
-从更早的 \texttt{best.pt} 回退，应选择新的输出目录。
-
-保存先完整写入 \texttt{.pt.tmp}，flush/fsync 后替换对应旧文件。
-I/O 错误最多尝试三次，间隔 $1$、$2$ 秒，使用同一步内存状态，不重复训练；
-失败临时文件尝试清理，持续失败停止，普通序列化错误直接抛出。
-先保存刷新的 best，再按条件保存 last，两者不是整体事务。
-保存需要至少额外一份完整检查点的空间，磁盘/配额故障不能由重试保证修复。
-
-\section{验证范围}
-
-从 \texttt{DiT-flow/} 内运行 \texttt{python -m unittest discover -s tests -v}。
-现有测试覆盖结构/掩码/作者损失/flow、GNT 与真实字体预处理、共享内存无文件采样、
-参考数与目标排除、设备选择、日志、梯度异常、检查点写入失败，以及小模型 CPU 续训与连续训练一致性。
-CUDA 设备选择测试使用模拟；测试不能替代真实 GPU 性能、稳定性和生成质量实验。
-
+参考主要注意力成本为 $O(B_sNL^2d+NZLd)$，内容为 $O(B_cL^2d)$，
+$J$ 步主干为 $O(JB_g(2L^2+LNZ)d)$，另需计入投影、FFN、batch 与反向。
+实际参考计算按补齐槽数计；PyTorch MHA 后端由环境决定，不保证使用 FlashAttention。
+现有测试覆盖双条件结构与梯度、执行顺序、位置编码、掩码/重排、作者配对平均、纯噪声 flow 与缓存采样，
+以及数据共享、预处理、诊断、写入失败和 CPU 小模型续训一致性。
+模拟设备测试与 CPU 回归不能替代真实 GPU 性能及生成质量实验。
 \end{document}
-

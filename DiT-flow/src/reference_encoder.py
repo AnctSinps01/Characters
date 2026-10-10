@@ -8,12 +8,11 @@ from .layers import (
     CrossAttentionBlock,
     PatchEmbed2D,
     SelfAttentionBlock,
-    SetAggregationBlock,
 )
 
 
 class ReferenceEncoder(nn.Module):
-    """Encode a variable, unordered set of paired handwriting/standard glyphs."""
+    """Encode each reference handwriting into Z tokens; concatenate, do not pool."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -21,7 +20,7 @@ class ReferenceEncoder(nn.Module):
         self.patch_embed = PatchEmbed2D(
             config.image_size,
             config.patch_size,
-            2 * config.in_channels,
+            config.in_channels,
             config.hidden_size,
         )
         self.local_blocks = nn.ModuleList(
@@ -34,37 +33,24 @@ class ReferenceEncoder(nn.Module):
         self.local_pool = CrossAttentionBlock(
             config.hidden_size, config.num_heads, config.mlp_ratio
         )
-        self.style_queries = nn.Parameter(
-            torch.empty(config.style_tokens, config.hidden_size)
-        )
-        self.set_pool_blocks = nn.ModuleList(
-            SetAggregationBlock(
-                config.hidden_size, config.num_heads, config.mlp_ratio
-            )
-            for _ in range(config.set_pool_depth)
-        )
         nn.init.normal_(self.description_queries, std=0.02)
-        nn.init.normal_(self.style_queries, std=0.02)
 
     def forward(
         self,
         handwriting: Tensor,
-        standard: Tensor,
         reference_mask: Tensor | None = None,
     ) -> Tensor:
         """
         Args:
             handwriting: ``[B, N, C, H, W]`` reference handwriting images.
-            standard: ``[B, N, C, H, W]`` matched standard glyph images.
             reference_mask: optional ``[B, N]`` boolean mask; ``True`` means valid.
         Returns:
-            Style tokens with shape ``[B, M, D]``.
+            Concatenated descriptions with shape ``[B, N*Z, D]``.
+            No position embedding is added to the learned queries or output.
         """
 
-        if handwriting.shape != standard.shape or handwriting.ndim != 5:
-            raise ValueError(
-                "handwriting and standard must share shape [B, N, C, H, W]"
-            )
+        if handwriting.ndim != 5:
+            raise ValueError("handwriting must have shape [B, N, C, H, W]")
         batch, reference_count, channels, height, width = handwriting.shape
         expected_image_shape = (
             self.config.in_channels,
@@ -92,13 +78,13 @@ class ReferenceEncoder(nn.Module):
         if (~reference_mask.any(dim=1)).any():
             raise ValueError("each batch item must contain at least one valid reference")
 
-        pairs = torch.cat((handwriting, standard), dim=2).reshape(
+        images = handwriting.reshape(
             batch * reference_count,
-            2 * channels,
+            channels,
             height,
             width,
         )
-        local_tokens = self.patch_embed(pairs)
+        local_tokens = self.patch_embed(images)
         for block in self.local_blocks:
             local_tokens = block(local_tokens)
 
@@ -112,15 +98,4 @@ class ReferenceEncoder(nn.Module):
             self.config.hidden_size,
         )
 
-        valid_descriptions = reference_mask.unsqueeze(-1).expand(
-            -1, -1, self.config.description_tokens
-        )
-        memory_padding_mask = ~valid_descriptions.reshape(batch, -1)
-        style = self.style_queries.unsqueeze(0).expand(batch, -1, -1)
-        for block in self.set_pool_blocks:
-            style = block(
-                style,
-                descriptions,
-                memory_padding_mask=memory_padding_mask,
-            )
-        return style
+        return descriptions

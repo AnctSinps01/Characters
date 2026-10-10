@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 from dataclasses import asdict
 import io
 import json
+import math
 import multiprocessing
 import os
 from pathlib import Path
@@ -20,9 +21,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.prepare_data import prepare
-from src import ModelConfig, TrainingConfig
+from src import Glyph2Hand, ModelConfig, TrainingConfig
 from src.data import HandwritingEpisodes, PreloadedGlyphs, iter_gnt, normalize_image, read_manifest
-from src.train import (is_unstarted_run, learning_rate, metrics_json,
+from src.train import (evaluate, is_unstarted_run, learning_rate, metrics_json,
                        optimizer_update, resolve_device, run)
 
 
@@ -111,26 +112,26 @@ class DataTests(unittest.TestCase):
                 expected = {
                     "target_standard": convert(standards[writer["labels"][selected[0]]]),
                     "target_handwriting": convert(images[selected[0]]),
-                    "reference_standard": torch.ones(5, 1, 16, 16),
                     "reference_handwriting": torch.ones(5, 1, 16, 16),
                     "reference_mask": torch.arange(5) < count,
                 }
                 for slot, sample in enumerate(selected[1:]):
-                    expected["reference_standard"][slot] = convert(standards[writer["labels"][sample]])
                     expected["reference_handwriting"][slot] = convert(images[sample])
                 actual = dataset[index]
+                self.assertNotIn("reference_standard", actual)
                 for key in expected:
                     torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
             dataset.close()
 
     def test_reference_range_includes_one_and_configured_maximum(self):
-        self.assertEqual(TrainingConfig().min_references, 1)
+        self.assertEqual(TrainingConfig().min_references, 4)
+        self.assertEqual(TrainingConfig().max_references, 4)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "data"
             fixture_data(root)
             for split in ("train", "val"):
                 for maximum in (1, 5):
-                    config = TrainingConfig(max_references=maximum)
+                    config = TrainingConfig(min_references=1, max_references=maximum)
                     dataset = HandwritingEpisodes(
                         root, split, length=64, min_references=config.min_references,
                         max_references=config.max_references, seed=config.seed)
@@ -181,8 +182,8 @@ class DataTests(unittest.TestCase):
             for index in range(12):
                 item = dataset[index]
                 valid = item["reference_mask"]
-                references = item["reference_standard"][valid, 0, 0, 0]
-                target = item["target_standard"][0, 0, 0]
+                references = item["reference_handwriting"][valid, 0, 0, 0]
+                target = item["target_handwriting"][0, 0, 0]
                 self.assertFalse((references == target).any())
                 self.assertEqual(len(references.unique()), len(references))
                 self.assertTrue((item["reference_handwriting"][~valid] == 1).all())
@@ -304,16 +305,18 @@ class TrainingTests(unittest.TestCase):
         self.assertAlmostEqual(learning_rate(2, config), config.learning_rate)
         self.assertAlmostEqual(learning_rate(10, config), config.learning_rate * config.min_lr_ratio)
 
-    def test_old_prompt_channel_checkpoint_is_rejected_before_writing(self):
+    def test_old_architecture_checkpoints_are_rejected_before_writing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkpoint = root / "old.pt"
-            torch.save({"version": 1}, checkpoint)
             output = root / "new_run"
             args = argparse.Namespace(device="cpu", resume=checkpoint, output=output)
-            with self.assertRaisesRegex(ValueError, "removed target-standard input channel"):
-                run(args)
-            self.assertFalse(output.exists())
+            for version in (1, 2):
+                with self.subTest(version=version):
+                    torch.save({"version": version}, checkpoint)
+                    with self.assertRaisesRegex(ValueError, "old checkpoint architecture"):
+                        run(args)
+                    self.assertFalse(output.exists())
 
     def test_metrics_json_has_bounded_precision_and_units(self):
         line = metrics_json({
@@ -341,7 +344,7 @@ class TrainingTests(unittest.TestCase):
         model = torch.nn.Linear(1, 1)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         scaler = torch.amp.GradScaler("cpu", init_scale=2.0**120)
-        config = TrainingConfig(accumulation_steps=1)
+        config = TrainingConfig()
         noises = []
 
         def large_loss(model, batch):
@@ -350,7 +353,7 @@ class TrainingTests(unittest.TestCase):
             return model(noise).sum() * 1e5
 
         with patch("src.train.batch_loss", side_effect=large_loss):
-            loss, norm = optimizer_update(model, optimizer, scaler, [{}],
+            loss, norm = optimizer_update(model, optimizer, scaler, {},
                                           torch.device("cpu"), "fp32", config)
         self.assertGreater(len(noises), 1)
         for noise in noises[1:]:
@@ -358,15 +361,49 @@ class TrainingTests(unittest.TestCase):
         self.assertTrue(np.isfinite(loss) and np.isfinite(norm))
         self.assertTrue(all(state["step"].item() == 1 for state in optimizer.state.values()))
 
+    def test_validation_restores_current_model_mode_and_training_rng(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            fixture_data(data)
+            model = Glyph2Hand(ModelConfig(
+                image_size=16, patch_size=4, hidden_size=16, num_heads=2,
+                local_depth=1, content_depth=1, generator_depth=1,
+                description_tokens=2, time_frequency_size=16,
+            ))
+            model.author_style_loss_weight = 0.05
+            config = TrainingConfig(batch_size=2, val_batches=1, sample_steps=2)
+            dataset = HandwritingEpisodes(data, "val", length=2,
+                                           min_references=1, max_references=2, seed=43)
+            loader = DataLoader(dataset, batch_size=2,
+                                generator=torch.Generator().manual_seed(43))
+            for training_mode in (True, False):
+                model.train(training_mode)
+                before = torch.get_rng_state().clone()
+                value = evaluate(model, loader, torch.device("cpu"), "fp32",
+                                 config, root / "preview.png")
+                self.assertTrue(math.isfinite(value))
+                self.assertEqual(model.training, training_mode)
+                torch.testing.assert_close(torch.get_rng_state(), before, rtol=0, atol=0)
+            model.train()
+            before = torch.get_rng_state().clone()
+            with patch("src.train.batch_loss", return_value=torch.tensor(float("inf"))):
+                with self.assertRaises(FloatingPointError):
+                    evaluate(model, loader, torch.device("cpu"), "fp32",
+                             config, root / "failed.png")
+            self.assertTrue(model.training)
+            torch.testing.assert_close(torch.get_rng_state(), before, rtol=0, atol=0)
+            dataset.close()
+
     def test_train_preview_and_resume_equal_uninterrupted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
             fixture_data(data)
             model = ModelConfig(image_size=16, patch_size=4, hidden_size=16, num_heads=2,
-                                mlp_ratio=2, local_depth=1, generator_depth=1,
-                                description_tokens=2, style_tokens=2, time_frequency_size=16)
-            config = TrainingConfig(steps=3, warmup_steps=1, batch_size=2, accumulation_steps=2,
+                                mlp_ratio=2, local_depth=1, content_depth=1, generator_depth=1,
+                                description_tokens=2, time_frequency_size=16)
+            config = TrainingConfig(steps=3, warmup_steps=1, batch_size=2,
                                     min_references=1, max_references=2, workers=0, val_batches=1,
                                     validate_every=3, save_every=1, log_every=1, sample_steps=2,
                                     precision="fp32")
@@ -395,13 +432,14 @@ class TrainingTests(unittest.TestCase):
             full = torch.load(root / "full/last.pt", weights_only=True)
             resumed = torch.load(root / "split/last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 3)
-            self.assertEqual(resumed["version"], 2)
+            self.assertEqual(resumed["version"], 3)
+            self.assertNotIn("ema", resumed)
             self.assertNotIn("preload_to_gpu", resumed["settings"]["training"])
-            for section in ("model", "ema"):
-                for name in full[section]:
-                    torch.testing.assert_close(full[section][name], resumed[section][name], rtol=0, atol=0)
+            for name in full["model"]:
+                torch.testing.assert_close(full["model"][name], resumed["model"][name], rtol=0, atol=0)
             torch.testing.assert_close(full["cpu_rng"], resumed["cpu_rng"], rtol=0, atol=0)
             for key, state in full["optimizer"]["state"].items():
+                self.assertEqual(state["step"].item(), 3)
                 for name, value in state.items():
                     torch.testing.assert_close(value, resumed["optimizer"]["state"][key][name], rtol=0, atol=0)
             with Image.open(root / "split/previews/step_0000003.png") as preview:
@@ -415,6 +453,8 @@ class TrainingTests(unittest.TestCase):
             metrics = [json.loads(line) for line in
                        (root / "split/metrics.jsonl").read_text().splitlines()]
             self.assertTrue(all(0 < item["grad_clip_scale"] <= 1 for item in metrics))
+            self.assertTrue(any("val_loss" in item for item in metrics))
+            self.assertTrue(all("val_loss_ema" not in item for item in metrics))
             # Check data identity before continuation, even when the path is unchanged.
             manifest_path = data / "manifest.json"
             manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")

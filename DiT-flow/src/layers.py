@@ -125,51 +125,6 @@ class CrossAttentionBlock(nn.Module):
         return outputs + self.mlp(self.mlp_norm(outputs))
 
 
-class SetAggregationBlock(nn.Module):
-    """Refine fixed style latents with CA(memory), SA(latents), then an FFN."""
-
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
-        super().__init__()
-        self.cross_query_norm = nn.LayerNorm(hidden_size)
-        self.cross_memory_norm = nn.LayerNorm(hidden_size)
-        self.cross_attention = nn.MultiheadAttention(
-            hidden_size, num_heads, dropout=0.0, batch_first=True
-        )
-        self.self_norm = nn.LayerNorm(hidden_size)
-        self.self_attention = nn.MultiheadAttention(
-            hidden_size, num_heads, dropout=0.0, batch_first=True
-        )
-        self.mlp_norm = nn.LayerNorm(hidden_size)
-        self.mlp = Mlp(hidden_size, mlp_ratio)
-
-    def forward(
-        self,
-        latents: Tensor,
-        memory: Tensor,
-        *,
-        memory_padding_mask: Tensor | None = None,
-    ) -> Tensor:
-        normalized_memory = self.cross_memory_norm(memory)
-        cross_outputs = self.cross_attention(
-            self.cross_query_norm(latents),
-            normalized_memory,
-            normalized_memory,
-            key_padding_mask=memory_padding_mask,
-            need_weights=False,
-        )[0]
-        latents = latents + cross_outputs
-
-        normalized_latents = self.self_norm(latents)
-        self_outputs = self.self_attention(
-            normalized_latents,
-            normalized_latents,
-            normalized_latents,
-            need_weights=False,
-        )[0]
-        latents = latents + self_outputs
-        return latents + self.mlp(self.mlp_norm(latents))
-
-
 def modulate(inputs: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
     return inputs * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
@@ -208,7 +163,7 @@ class ContinuousTimeEmbedding(nn.Module):
 
 
 class AdaLNZeroDiTBlock(nn.Module):
-    """DiT block with time-modulated SA/MLP and an ordinary style CA branch."""
+    """Time-modulated SA/FFN with independent content CA then style CA."""
 
     def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
         super().__init__()
@@ -216,9 +171,14 @@ class AdaLNZeroDiTBlock(nn.Module):
         self.self_attention = nn.MultiheadAttention(
             hidden_size, num_heads, dropout=0.0, batch_first=True
         )
-        self.cross_query_norm = nn.LayerNorm(hidden_size)
-        self.cross_memory_norm = nn.LayerNorm(hidden_size)
-        self.cross_attention = nn.MultiheadAttention(
+        self.content_query_norm = nn.LayerNorm(hidden_size)
+        self.content_memory_norm = nn.LayerNorm(hidden_size)
+        self.content_attention = nn.MultiheadAttention(
+            hidden_size, num_heads, dropout=0.0, batch_first=True
+        )
+        self.style_query_norm = nn.LayerNorm(hidden_size)
+        self.style_memory_norm = nn.LayerNorm(hidden_size)
+        self.style_attention = nn.MultiheadAttention(
             hidden_size, num_heads, dropout=0.0, batch_first=True
         )
         self.mlp_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -227,7 +187,10 @@ class AdaLNZeroDiTBlock(nn.Module):
         nn.init.zeros_(self.modulation[-1].weight)
         nn.init.zeros_(self.modulation[-1].bias)
 
-    def forward(self, inputs: Tensor, style: Tensor, time_embedding: Tensor) -> Tensor:
+    def forward(
+        self, inputs: Tensor, content: Tensor, style: Tensor,
+        time_embedding: Tensor, style_padding_mask: Tensor | None = None,
+    ) -> Tensor:
         scale_sa, shift_sa, gate_sa, scale_mlp, shift_mlp, gate_mlp = (
             self.modulation(time_embedding).chunk(6, dim=1)
         )
@@ -235,13 +198,19 @@ class AdaLNZeroDiTBlock(nn.Module):
         sa_outputs = self.self_attention(sa_inputs, sa_inputs, sa_inputs, need_weights=False)[0]
         outputs = inputs + gate_sa.unsqueeze(1) * sa_outputs
 
-        cross_outputs = self.cross_attention(
-            self.cross_query_norm(outputs),
-            self.cross_memory_norm(style),
-            self.cross_memory_norm(style),
+        normalized_content = self.content_memory_norm(content)
+        content_outputs = self.content_attention(
+            self.content_query_norm(outputs), normalized_content, normalized_content,
             need_weights=False,
         )[0]
-        outputs = outputs + cross_outputs
+        outputs = outputs + content_outputs
+
+        normalized_style = self.style_memory_norm(style)
+        style_outputs = self.style_attention(
+            self.style_query_norm(outputs), normalized_style, normalized_style,
+            key_padding_mask=style_padding_mask, need_weights=False,
+        )[0]
+        outputs = outputs + style_outputs
 
         mlp_inputs = modulate(self.mlp_norm(outputs), shift_mlp, scale_mlp)
         return outputs + gate_mlp.unsqueeze(1) * self.mlp(mlp_inputs)

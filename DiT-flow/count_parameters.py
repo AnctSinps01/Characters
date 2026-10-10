@@ -73,6 +73,9 @@ def main() -> None:
     generator_parameters = sum(
         parameter.numel() for parameter in model.generator.parameters()
     )
+    content_parameters = sum(
+        parameter.numel() for parameter in model.content_encoder.parameters()
+    )
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
@@ -80,6 +83,7 @@ def main() -> None:
 
     print(f"Configuration: {config}")
     print(f"Reference encoder: {format_count(reference_parameters)}")
+    print(f"Content encoder:   {format_count(content_parameters)}")
     print(f"Generator:         {format_count(generator_parameters)}")
     print(f"Total:              {format_count(total_parameters)}")
     print(f"Trainable:          {format_count(trainable_parameters)}")

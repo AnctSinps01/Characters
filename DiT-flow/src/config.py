@@ -6,22 +6,20 @@ import math
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """Architecture choices that are still experimental in the design document."""
+    """Pure-noise flow with independent content and reference-style encoders."""
 
     image_size: int = 64
     patch_size: int = 8
     in_channels: int = 1
     hidden_size: int = 256
     num_heads: int = 8
-    mlp_ratio: float = 4.0                  # FNN hidden dim
-    local_depth: int = 4
-    set_pool_depth: int = 2                 # NZ to M {CA -> SA -> FFN}
-    generator_depth: int = 8
-    description_tokens: int = 32
-    style_tokens: int = 32
+    mlp_ratio: float = 2.0                  # FNN hidden dim
+    local_depth: int = 8                    # 单参考手写字 SA 层数
+    content_depth: int = 8                  # 目标标准字 SA 层数，独立调整
+    generator_depth: int = 8                # 主干层数
+    description_tokens: int = 16            # 单字描述 token 数
     time_frequency_size: int = hidden_size  # Time embed origin dim
     time_scale: float = 1_000.0             # 在生成正弦/余弦特征前，把 t∈[0,1] 放大
-    sigma: float = 0.1
 
     def __post_init__(self) -> None:
         positive_ints = {
@@ -30,16 +28,14 @@ class ModelConfig:
             "in_channels": self.in_channels,
             "hidden_size": self.hidden_size,
             "num_heads": self.num_heads,
-            "set_pool_depth": self.set_pool_depth,
             "description_tokens": self.description_tokens,
-            "style_tokens": self.style_tokens,
             "time_frequency_size": self.time_frequency_size,
         }
         for name, value in positive_ints.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
-        if self.local_depth < 0 or self.generator_depth < 0:
-            raise ValueError("local_depth and generator_depth cannot be negative")
+        if min(self.local_depth, self.content_depth, self.generator_depth) < 0:
+            raise ValueError("local_depth, content_depth and generator_depth cannot be negative")
         if self.image_size % self.patch_size:
             raise ValueError("image_size must be divisible by patch_size")
         if self.hidden_size % self.num_heads:
@@ -50,8 +46,6 @@ class ModelConfig:
             raise ValueError("time_frequency_size must be even")
         if self.mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be positive")
-        if self.sigma < 0:
-            raise ValueError("sigma cannot be negative")
 
     @property
     def grid_size(self) -> int:
@@ -66,20 +60,18 @@ class ModelConfig:
 class TrainingConfig:
     """Edit these defaults for a new run; resume restores saved settings."""
 
-    steps: int = 100_000
+    steps: int = 1_000_000
     batch_size: int = 64
-    accumulation_steps: int = 1
-    min_references: int = 1               # Inclusive lower bound
-    max_references: int = 16              # Sample reference count uniformly up to this
+    min_references: int = 4              # 参考字数下限
+    max_references: int = 4              # 参考字数上限
     learning_rate: float = 1e-4
     min_lr_ratio: float = 0.1
     warmup_steps: int = 1_000
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
-    ema_decay: float = 0.999
-    author_style_loss_weight: float = 0.05  # Same-author/orthogonal-author token loss
+    author_style_loss_weight: float = 0.05  # 作者损失比例
     precision: str = "bf16"
-    preload_to_gpu: bool = False          # Keep prepared uint8 glyphs in VRAM
+    preload_to_gpu: bool = False            # 放进显存 | 放进内存
     workers: int = 8
     val_batches: int = 16
     validate_every: int = 1_000
@@ -91,7 +83,7 @@ class TrainingConfig:
     def __post_init__(self):
         if type(self.preload_to_gpu) is not bool:
             raise ValueError("preload_to_gpu must be a bool")
-        for name in ("steps", "batch_size", "accumulation_steps", "min_references",
+        for name in ("steps", "batch_size", "min_references",
                      "max_references", "val_batches", "validate_every", "save_every",
                      "log_every", "sample_steps"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
@@ -106,8 +98,8 @@ class TrainingConfig:
         if (not math.isfinite(self.author_style_loss_weight)
                 or self.author_style_loss_weight < 0):
             raise ValueError("author_style_loss_weight must be finite and nonnegative")
-        if not 0 <= self.min_lr_ratio <= 1 or not 0 <= self.ema_decay < 1:
-            raise ValueError("invalid min_lr_ratio or ema_decay")
+        if not 0 <= self.min_lr_ratio <= 1:
+            raise ValueError("invalid min_lr_ratio")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
             raise ValueError("weight_decay must be finite and nonnegative")
         if self.precision not in ("fp32", "fp16", "bf16"):

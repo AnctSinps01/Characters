@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import torch
 from torch import Tensor, nn
 
 from .config import ModelConfig
@@ -13,7 +14,7 @@ from .layers import (
 
 
 class ConditionalDiT(nn.Module):
-    """Predict pixel-space velocity from the current state, time, and style."""
+    """Predict velocity using SA -> Content CA -> Style CA -> FFN blocks."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -41,18 +42,34 @@ class ConditionalDiT(nn.Module):
         self,
         state: Tensor,
         times: Tensor,
+        content: Tensor,
         style: Tensor,
+        style_mask: Tensor | None = None,
     ) -> Tensor:
         if state.ndim != 4 or state.shape[1] != self.config.in_channels:
             raise ValueError(
                 f"state must have shape [B, {self.config.in_channels}, H, W]"
             )
-        if state.shape[0] != times.shape[0] or state.shape[0] != style.shape[0]:
-            raise ValueError("state, times, and style must have the same batch size")
+        batch = state.shape[0]
+        if times.shape != (batch,):
+            raise ValueError("times must have shape [B]")
+        if content.shape != (batch, self.config.patch_count, self.config.hidden_size):
+            raise ValueError("content must have shape [B, L, D]")
+        if (style.ndim != 3 or style.shape[0] != batch
+                or style.shape[1] < 1 or style.shape[2] != self.config.hidden_size):
+            raise ValueError("style must have shape [B, N*Z, D]")
+        padding_mask = None
+        if style_mask is not None:
+            if style_mask.shape != style.shape[:2]:
+                raise ValueError("style_mask must have shape [B, N*Z]")
+            style_mask = style_mask.to(device=style.device, dtype=torch.bool)
+            if (~style_mask.any(dim=1)).any():
+                raise ValueError("each sample needs at least one valid style token")
+            padding_mask = ~style_mask
         tokens = self.patch_embed(state)
         time_embedding = self.time_embed(times).to(dtype=tokens.dtype)
         for block in self.blocks:
-            tokens = block(tokens, style, time_embedding)
+            tokens = block(tokens, content, style, time_embedding, padding_mask)
         velocity_patches = self.final(tokens, time_embedding)
         return unpatchify(
             velocity_patches,

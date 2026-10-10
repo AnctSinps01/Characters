@@ -30,7 +30,7 @@ python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0
 
 ## 4. 先训练 100 步
 
-模型和训练参数直接改 `src/config.py`。每个样本在 `min_references` 到 `max_references` 之间均匀随机抽参考字数。图像尺寸和参考数量上限请在处理数据前确定。训练默认会额外加入作者风格损失（`author_style_loss_weight=0.05`）：固定槽位的风格 token 对同作者使用 `1 - cosine`，对不同作者使用 `cosine²`，分别鼓励一致和正交；设为 `0` 可关闭。这个损失需要 batch 中出现作者索引，数据集会自动提供。
+模型和训练参数直接改 `src/config.py`。当前默认每样本 4 个参考，调整 `min_references`/`max_references` 后在范围内均匀整数抽样。图像尺寸和参考上限请在处理数据前确定。每 batch 更新一次；风格只读手写字，目标标准字经独立内容编码器提取 token，主干从纯高斯噪声生成。训练为 flow MSE 加作者损失（默认权重 `0.05`）：对有效参考的同描述槽取均值后，同作者用 `1-cosine`、异作者用 `cosine²`。只比较当前 batch，不缓存跨 batch 配对；完整配对数量与公式见 [README](README.md)。
 
 训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。更新训练代码后无需重新 prepare。
 
@@ -43,7 +43,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 | 文件 | 内容 |
 |---|---|
 | `last.pt` | 最近一次成功保存的完整训练状态，用于续训；保存间隔内可能落后于当前步 |
-| `best.pt` | EMA flow 验证损失最低时的完整训练状态；验证不含作者风格损失 |
+| `best.pt` | 当前模型双损失验证总目标最低时的完整训练状态 |
 | `metrics.jsonl` | 训练日志 |
 | `gradient_diagnostics.jsonl` | 裁剪前梯度诊断：范数最大的参数/模块、最大梯度元素、裁剪比例与非有限值位置 |
 | `run.json` | 本次配置 |
@@ -53,7 +53,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 
 续训使用检查点保存的配置；修改 `src/config.py` 中的模型和训练超参数只影响新训练。运行方式开关 `preload_to_gpu` 例外，始终读取当前配置；`--device`、`--workers` 和 `--stop-after` 也可以在续训时指定。`--stop-after` 是绝对优化器步数，不改变保存的总步数或学习率日程。
 
-当前架构已移除生成主干的目标标准字提示通道，检查点版本为 2。版本 1 的旧检查点输入层尺寸不同，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的预处理数据仍可复用，目标标准字继续用于构造流的加噪起点，参考字仍使用手写/标准字对。
+当前架构为纯噪声 flow、独立内容编码、未浓缩的多参考风格序列和双 CA 主干，检查点版本为 3。版本 1/2 权重结构不兼容，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的灰度预处理数据只要尺寸与字符数量满足配置即可复用，目标标准字作为内容条件，参考字不再配标准字。
 
 ```bash
 python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --resume ../runs/DiT-flow/first/last.pt --device cuda
@@ -61,7 +61,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --re
 
 在训练循环中按 `Ctrl+C` 后，会完成当前优化器步、跳过该步验证并保存 `last.pt`，等保存完成再退出。强杀进程或一般运行异常只保留此前成功保存的检查点。训练结果都在仓库根目录的 `runs/DiT-flow/first/`，退租前复制回来。
 
-目录迁移不改变检查点格式。已有 `data/prepared/` 无需重做；已有 `runs/first/last.pt` 可以通过 `--output ../runs/first --resume ../runs/first/last.pt` 继续原实验，无需把旧结果搬到新的示例目录。
+调整目录路径不改变数据格式，已有 `data/prepared/` 可复用。只有当前版本 3 的检查点支持 `--resume`；旧运行结果请保留，使用新的输出目录训练当前架构。
 
 ## 6. 排查梯度异常
 
@@ -71,9 +71,9 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --re
 
 若 float32 范数计算得到 Inf/NaN，训练器先以 float64 重算，区分范数归约溢出与梯度元素本身异常。有限梯度按真实范数裁剪；真正非有限的梯度不会送入优化器。FP16 溢出仍会降低 AMP 缩放倍率并用相同数据、时间和噪声重试；BF16/FP32 遇到非有限梯度会记录参数位置后停止，保留已有检查点。这项处理不能保证网络本身稳定，持续增大的原始梯度仍应排查。
 
-先查看异常前后 `top_parameters` 和 `top_modules` 的变化，确定问题集中在参考分支、时间调制、注意力还是输出层，再针对该处检查激活和归一化输入方差。参考分支的描述 token 与最终风格 token 在被下游注意力读取时已有 LayerNorm，仅在浓缩输出后重复添加归一化不能证明能够修复爆炸。
+先查看异常前后 `top_parameters` 和 `top_modules` 的变化，确定问题集中在风格分支、内容分支、时间调制、注意力还是输出层，再针对该处检查激活和归一化输入方差。风格描述和内容 token 在被主干 CA 读取时已有 LayerNorm，仅重复添加归一化不能证明能够修复爆炸。
 
-以上诊断不改变模型结构和检查点版本；当前版本 2 的检查点可直接续训，无需重新准备数据。
+这些诊断逻辑保留在当前架构中。版本 3 的检查点可续训，版本 1/2 不兼容；无需仅因启用诊断而重新准备数据。
 
 ## 7. 检查点写入失败
 

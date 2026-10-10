@@ -84,7 +84,7 @@ class GradientDiagnosticTests(unittest.TestCase):
         with patch("src.train.batch_loss", side_effect=lambda model, batch:
                    InfiniteBackward.apply(model.weight).sum()):
             with self.assertRaisesRegex(FloatingPointError, "non-finite gradients in weight"):
-                optimizer_update(model, optimizer, scaler, [{}], torch.device("cpu"),
+                optimizer_update(model, optimizer, scaler, {}, torch.device("cpu"),
                                  "fp32", TrainingConfig(), on_diagnostic=reports.append)
         self.assertFalse(optimizer.state)
         self.assertEqual(reports[0]["event"], "nonfinite_gradients")
@@ -99,7 +99,7 @@ class GradientDiagnosticTests(unittest.TestCase):
         reports = []
         with patch("src.train.batch_loss", return_value=torch.tensor(float("inf"))):
             with self.assertRaisesRegex(FloatingPointError, "non-finite training loss"):
-                optimizer_update(model, optimizer, scaler, [{}], torch.device("cpu"),
+                optimizer_update(model, optimizer, scaler, {}, torch.device("cpu"),
                                  "fp32", TrainingConfig(), on_diagnostic=reports.append)
         self.assertEqual(reports[0]["event"], "nonfinite_loss")
         self.assertEqual(reports[0]["loss"], "inf")

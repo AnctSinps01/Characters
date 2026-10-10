@@ -83,25 +83,29 @@ def metrics_json(metrics: dict) -> str:
 
 
 def batch_loss(model, batch):
-    flow = build_flow_matching_batch(batch["target_standard"], batch["target_handwriting"], model.config.sigma)
-    # Encode once so the same fixed-size style representation drives both the
-    # velocity objective and the optional author-level regularizer.
-    style = model.encode_style(
-        batch["reference_handwriting"], batch["reference_standard"],
-        batch["reference_mask"]
+    flow = build_flow_matching_batch(batch["target_handwriting"])
+    style = model.encode_style(batch["reference_handwriting"], batch["reference_mask"])
+    content = model.encode_content(batch["target_standard"])
+    prediction = model.predict_velocity(
+        flow.state, flow.times, content, style, batch["reference_mask"]
     )
-    prediction = model.predict_velocity(flow.state, flow.times, style)
     # Accumulate the MSE in float32 even under autocast.
     loss = flow_matching_loss(prediction.float(), flow.target_velocity.float())
     style_weight = getattr(model, "author_style_loss_weight", 0.0)
     if style_weight:
         if "author_index" not in batch:
             raise ValueError("author_style_loss_weight requires author_index in each batch")
-        loss = loss + style_weight * author_style_loss(style, batch["author_index"])
+        grouped = style.reshape(
+            style.shape[0], batch["reference_handwriting"].shape[1],
+            model.config.description_tokens, model.config.hidden_size,
+        )
+        loss = loss + style_weight * author_style_loss(
+            grouped, batch["author_index"], reference_mask=batch["reference_mask"]
+        )
     return loss
 
 
-def optimizer_update(model, optimizer, scaler, batches, device, precision, config,
+def optimizer_update(model, optimizer, scaler, raw, device, precision, config,
                      *, on_diagnostic=None, diagnose=False):
     """Retry FP16 overflow at a lower scale using the same episodes and noise."""
     cpu_rng = torch.get_rng_state()
@@ -112,18 +116,15 @@ def optimizer_update(model, optimizer, scaler, batches, device, precision, confi
             if cuda_rng is not None:
                 torch.cuda.set_rng_state(cuda_rng, device)
         optimizer.zero_grad(set_to_none=True)
-        total_loss = 0.0
-        for raw in batches:
-            batch = move_batch(raw, device)
-            with autocast_context(device, precision):
-                loss = batch_loss(model, batch)
-            if not torch.isfinite(loss):
-                if on_diagnostic is not None:
-                    on_diagnostic({"event": "nonfinite_loss", "attempt": attempt + 1,
-                                   "loss": json_number(loss.detach().item())})
-                raise FloatingPointError("non-finite training loss; last checkpoint preserved")
-            total_loss += loss.detach().item() / config.accumulation_steps
-            scaler.scale(loss / config.accumulation_steps).backward()
+        batch = move_batch(raw, device)
+        with autocast_context(device, precision):
+            loss = batch_loss(model, batch)
+        if not torch.isfinite(loss):
+            if on_diagnostic is not None:
+                on_diagnostic({"event": "nonfinite_loss", "attempt": attempt + 1,
+                               "loss": json_number(loss.detach().item())})
+            raise FloatingPointError("non-finite training loss; last checkpoint preserved")
+        scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         gradients = GradientSnapshot.capture(model)
         finite = bool(torch.isfinite(gradients.total))
@@ -144,7 +145,7 @@ def optimizer_update(model, optimizer, scaler, batches, device, precision, confi
         gradients.clip(config.gradient_clip)
         scaler.step(optimizer)
         scaler.update()
-        return total_loss, gradients.total.item()
+        return loss.detach().item(), gradients.total.item()
     raise FloatingPointError("FP16 gradients remain non-finite after 16 scale reductions")
 
 
@@ -170,32 +171,36 @@ def save_preview(batch, generated, path: Path):
 
 @torch.no_grad()
 def evaluate(model, loader, device, precision, config, preview_path):
+    was_training = model.training
     model.eval()
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     # Fixed validation times/noise; validation must not perturb training RNG.
-    with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(config.seed + 10_000)
-        total, samples = 0.0, 0
-        for index, raw in enumerate(loader):
-            batch = move_batch(raw, device)
+    try:
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(config.seed + 10_000)
+            total, samples = 0.0, 0
+            for index, raw in enumerate(loader):
+                batch = move_batch(raw, device)
+                with autocast_context(device, precision):
+                    loss = batch_loss(model, batch)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("non-finite validation loss")
+                total += loss.item() * len(batch["target_standard"])
+                samples += len(batch["target_standard"])
+                if index == 0:
+                    preview = {key: value[:4] for key, value in batch.items()}
+            # Preview sampling must not change the loss RNG stream.
             with autocast_context(device, precision):
-                loss = batch_loss(model, batch)
-            if not torch.isfinite(loss):
-                raise FloatingPointError("non-finite validation loss")
-            total += loss.item() * len(batch["target_standard"])
-            samples += len(batch["target_standard"])
-            if index == 0:
-                preview = {key: value[:4] for key, value in batch.items()}
-        # Preview is generated after all losses so sample settings do not change
-        # the validation RNG stream used to compare checkpoints.
-        with autocast_context(device, precision):
-            generated = sample_euler(model, preview["target_standard"],
-                                     preview["reference_handwriting"], preview["reference_standard"],
-                                     steps=config.sample_steps, reference_mask=preview["reference_mask"])
-        if not torch.isfinite(generated).all():
-            raise FloatingPointError("non-finite generated image")
-        save_preview(preview, generated, preview_path)
-    return total / samples
+                generated = sample_euler(
+                    model, preview["target_standard"], preview["reference_handwriting"],
+                    steps=config.sample_steps, reference_mask=preview["reference_mask"]
+                )
+            if not torch.isfinite(generated).all():
+                raise FloatingPointError("non-finite generated image")
+            save_preview(preview, generated, preview_path)
+        return total / samples
+    finally:
+        model.train(was_training)
 
 
 def atomic_save(payload, path):
@@ -302,12 +307,12 @@ def run(args):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
-    if checkpoint is not None and checkpoint.get("version") == 1:
+    if checkpoint is not None and checkpoint.get("version") in (1, 2):
         raise ValueError(
-            "checkpoint version 1 uses the removed target-standard input channel; "
+            "old checkpoint architecture is incompatible with content/style CA and pure-noise flow; "
             "start a new run without --resume in a new output directory"
         )
-    if checkpoint is not None and checkpoint.get("version") != 2:
+    if checkpoint is not None and checkpoint.get("version") != 3:
         raise ValueError("unsupported checkpoint version")
     if checkpoint is not None:
         settings = checkpoint["settings"]
@@ -374,9 +379,6 @@ def run(args):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     model = Glyph2Hand(model_config).to(device).train()
-    # Copy the EMA before attaching the training-only regularizer so validation
-    # continues to report the flow-matching objective by itself.
-    ema = copy.deepcopy(model).eval().requires_grad_(False)
     # Keep this runtime-only: it is restored from TrainingConfig and should not
     # become a model parameter or alter the checkpoint state-dict format.
     model.author_style_loss_weight = config.author_style_loss_weight
@@ -386,7 +388,6 @@ def run(args):
     best = float("inf")
     if checkpoint:
         model.load_state_dict(checkpoint["model"])
-        ema.load_state_dict(checkpoint["ema"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scaler.load_state_dict(checkpoint["scaler"])
         best = checkpoint["best_val_loss"]
@@ -394,7 +395,7 @@ def run(args):
         if device.type == "cuda" and checkpoint["cuda_rng"] is not None:
             torch.cuda.set_rng_state(checkpoint["cuda_rng"], device)
     del checkpoint
-    episodes_per_step = config.batch_size * config.accumulation_steps
+    episodes_per_step = config.batch_size
     data_device = device if config.preload_to_gpu else torch.device("cpu")
     preloaded = PreloadedGlyphs(args.data, device=data_device, verbose=True)
     if preloaded.fingerprint != fingerprint:
@@ -426,16 +427,16 @@ def run(args):
 
     def save(name):
         atomic_save({
-            "version": 2, "settings": settings, "data_fingerprint": fingerprint,
+            "version": 3, "settings": settings, "data_fingerprint": fingerprint,
             "step": completed, "best_val_loss": best,
-            "model": model.state_dict(), "ema": ema.state_dict(),
+            "model": model.state_dict(),
             "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
             "cpu_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
         }, args.output / name)
 
     print(f"Device={device}, precision={precision}, parameters={sum(p.numel() for p in model.parameters()):,}; "
-          f"effective batch={episodes_per_step}; start step={completed}", flush=True)
+          f"batch={episodes_per_step}; start step={completed}", flush=True)
     start_step = completed
     start = time.monotonic()
     try:
@@ -443,7 +444,7 @@ def run(args):
             lr = learning_rate(step, config)
             for group in optimizer.param_groups:
                 group["lr"] = lr
-            batches = [next(iterator) for _ in range(config.accumulation_steps)]
+            batch = next(iterator)
 
             def record_diagnostic(report):
                 record = {"step": step, "precision": precision, **report}
@@ -454,12 +455,9 @@ def run(args):
                           f"see {args.output / 'gradient_diagnostics.jsonl'}", flush=True)
 
             total_loss, grad_norm = optimizer_update(
-                model, optimizer, scaler, batches, device, precision, config,
+                model, optimizer, scaler, batch, device, precision, config,
                 on_diagnostic=record_diagnostic,
                 diagnose=(step == start_step + 1 or step % config.log_every == 0 or step == stop_step))
-            with torch.no_grad():
-                for averaged, current in zip(ema.parameters(), model.parameters()):
-                    averaged.lerp_(current, 1 - config.ema_decay)
             completed = step
             metrics = {"step": step, "train_loss": total_loss, "lr": lr,
                        "grad_norm": grad_norm,
@@ -468,12 +466,12 @@ def run(args):
             final = step == stop_step or interrupted
             improved = False
             if not interrupted and (step % config.validate_every == 0 or final):
-                val_loss = evaluate(ema, val_loader, device, precision, config,
+                val_loss = evaluate(model, val_loader, device, precision, config,
                                     args.output / "previews" / f"step_{step:07d}.png")
-                metrics["val_loss_ema"] = val_loss
+                metrics["val_loss"] = val_loss
                 improved = val_loss < best
                 best = min(best, val_loss)
-            if step % config.log_every == 0 or "val_loss_ema" in metrics or final:
+            if step % config.log_every == 0 or "val_loss" in metrics or final:
                 if device.type == "cuda":
                     allocated_gb = torch.cuda.max_memory_allocated(device) / 1024**3
                     metrics["peak_allocated"] = f"{allocated_gb:.8f} GB"

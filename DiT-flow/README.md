@@ -1,6 +1,6 @@
 # Glyph2Hand：DiT + flow matching 手写字生成
 
-根据同一书写者的若干「手写字 / 同字标准字」参考对，将目标标准字生成该书写者风格的手写图。本说明对照当前 `src/` 实现，记录模型、数据、损失、训练、推理与恢复行为；默认参数是实验设置，不代表已验证的生成质量。
+根据同一书写者的若干参考手写字与目标标准字，从纯高斯噪声生成该书写者风格的目标手写图。参考字不配标准字；目标标准字由独立内容编码器处理。本说明对照当前 `src/` 实现，记录模型、数据、双损失、训练、推理与恢复行为；默认参数是实验设置，不代表已验证的生成质量。
 
 架构图和公式见 [README.tex](readme/README.tex) / [README.pdf](readme/README.pdf)，服务器操作步骤见 [TRAINING.md](TRAINING.md)，源码索引见 [src/README.md](src/README.md)。`readme/README.v1-with-diagrams.*` 是历史设计，不代表当前实现。通用线条图变形路线见 [../twist/](../twist/README.md)。
 
@@ -21,32 +21,38 @@ python -m unittest discover -s tests -v
 
 ## 模型接口与张量约定
 
-设批量为 `B`、参考槽数为 `N`、图像边长为 `n`、块边长为 `p`、特征维为 `d`、每组描述数为 `Z`、风格 token 数为 `M`。空间 token 数 `L=(n/p)²`。PyTorch 使用通道在前的布局：
+设批量为 `B`、参考槽数为 `N`、图像边长为 `n`、块边长为 `p`、特征维为 `d`、每字描述数为 `Z=description_tokens`。空间 token 数 `L=(n/p)²`，风格序列长度为 `N·Z`。PyTorch 使用通道在前的布局：
 
 | 输入 / 输出 | 形状与含义 |
 |---|---|
-| `reference_handwriting`、`reference_standard` | `[B,N,C,n,n]`，按槽位成对，同一 episode 来自同一作者 |
+| `reference_handwriting` | `[B,N,C,n,n]`，同一 episode 来自同一作者，只包含手写字 |
+| `target_standard` | `[B,C,n,n]`，目标标准字，仅作为内容条件 |
 | `reference_mask` | 可选 `[B,N]`；`True` 表示有效参考，省略时全部有效，每个样本至少有一个有效参考 |
 | `state` / 预测速度 | `[B,C,n,n]`，当前流状态 / 像素速度 |
 | `times` | `[B]`，连续流时间，训练采样范围为 `[0,1)` |
-| `style` | `[B,M,d]`，固定数量、固定槽位的风格 token |
+| `content` | `[B,L,d]`，目标标准字的空间 token |
+| `style` | `[B,N·Z,d]`，各参考字的 Z 个描述直接拼接 |
 
-默认 `C=1`。模型层可按 `in_channels` 构造多通道版本，但现有数据准备、训练器和预览只支持单通道灰度字图。训练字图取值为 `[-1,1]`，白色为 `+1`，黑色为 `-1`；加噪状态和预测速度不受此范围约束。
+默认 `C=1`。模型层可按 `in_channels` 构造多通道版本，但现有数据准备、训练器和预览只支持单通道灰度字图。训练字图取值为 `[-1,1]`，白色为 `+1`，黑色为 `-1`；噪声、流中间状态和预测速度不受此范围约束。
 
-`Glyph2Hand.forward(state, times, reference_handwriting, reference_standard, reference_mask=None)` 先编码参考，再预测速度。也可以分别调用 `encode_style(...)` 和 `predict_velocity(state, times, style)`，在多个目标和积分步之间复用风格。风格编码不依赖目标、时间或当前状态；训练中梯度保持连通，参数更新后需重算缓存。
+`Glyph2Hand.forward(state, times, target_standard, reference_handwriting, reference_mask=None)` 编码内容和参考后预测速度。也可以分别调用 `encode_content(target_standard)`、`encode_style(reference_handwriting, reference_mask=None)` 和 `predict_velocity(state, times, content, style, reference_mask=None)`。内容/风格编码均不依赖时间或当前状态，采样时各编码一次并在积分步间复用；训练中梯度保持连通，参数更新后需重算缓存。
 
-目标标准字 **只用于构造流起点**，没有额外的干净目标图通道传入速度网络。参考分支仍同时读取手写字和同字标准字。
+目标标准字 **只通过内容 token 条件进入主干**，不参与构造起点，也不作为额外图像通道拼入流状态。流起点完全是 `N(0,I)` 噪声。
 
 ## 参考编码器
 
-1. 将每个参考对沿通道拼为 `2C` 通道，将 `[B,N,...]` 合并为 `[B*N,...]`。使用 `Conv2d(kernel_size=p, stride=p, bias=True)` 分块，相当于把每个 `2Cp²` 维块投影为 `d` 维，再加固定二维正弦余弦位置编码。
+1. 仅读取参考手写字，将 `[B,N,C,n,n]` 合并为 `[B*N,C,n,n]`。使用 `Conv2d(kernel_size=p, stride=p, bias=True)` 分块，把每个 `Cp²` 维块投影为 `d` 维，再加一次固定二维正弦余弦位置编码。
 2. 每组独立经过 `local_depth` 个 `SA → FFN` 块。每个子层使用前置 LayerNorm 和残差；所有组共享这些参数，此时没有组间注意力。
-3. 共享的可学习 `Q_Z:[Z,d]` 通过一个 `CA → FFN` 块读取每组 `L` 个 token，得到 `[B*N,Z,d]` 描述。Q 和 memory 分别归一化，CA 与 FFN 各有残差。压缩后没有描述自注意力，也没有原始空间 token 的旁路。
-4. 将描述整理为 `[B,NZ,d]`。另一个独立的可学习 `Q_M:[M,d]` 初始化风格 token，经过 `set_pool_depth` 个 `CA → SA → FFN` 汇总块；每层独立参数、普通前置 LN 与残差。每层 CA 读取同一份描述，描述本身不被更新；SA 仅在 `M` 个风格 token 间进行。输出没有额外的末尾 LN。
+3. 共享的可学习 `Q_Z:[Z,d]` 通过 **恰好一个 `CA → FFN` 块** 读取每字 `L` 个 token，得到 `[B*N,Z,d]` 描述。Q 和 memory 分别归一化，CA 与 FFN 各有残差。查询和浓缩输出均不添加位置编码；压缩后没有描述自注意力，也没有原始空间 token 的旁路。
+4. 将描述直接整理为 `[B,N·Z,d]`，供每个主干 Style CA 读取。不再进行参考集合浓缩，没有额外汇总查询、集合 CA/SA 层或末尾 LN。
 
-`Q_Z`、`Q_M` 独立，均以标准差 `0.02` 的正态分布初始化。`Z` 和 `M` 不必相等，也不等于特征维度或预设笔画种类数。内容与风格的严格解耦、槽位的可解释性都没有由结构保证。
+`Q_Z` 以标准差 `0.02` 的正态分布初始化。`Z` 表示每个参考字的描述容量，不等于特征维度或预设笔画种类数。内容与风格的严格解耦、槽位的可解释性都没有由结构保证。
 
-汇总不加参考组序号或拼接序列位置。同步重排参考手写、标准字和掩码不会改变风格结果，允许浮点误差。掩码扩展到每组全部 `Z` 个描述，在每层集合 CA 中使用取反后的 `key_padding_mask`。补齐槽仍参与逐组编码，因此计算成本按槽数计算；应填有限的字图数值，当前数据集填白色 `+1`。
+拼接不加参考组序号或绝对序列位置。重排参考字会对应重排其描述组；同步重排描述和掩码后，主干速度结果不变，允许浮点误差。掩码扩展到每字全部 `Z` 个描述，在每层 Style CA 中使用取反后的 `key_padding_mask`。补齐槽仍参与逐组编码，因此计算成本按槽数计算；应填有限的字图数值，当前数据集填白色 `+1`。
+
+## 内容编码器
+
+`content_encoder.py` 与单参考字的风格编码使用相同的 `PatchEmbed2D → SA/FFN` 结构，参数完全独立，SA 深度由 `content_depth` 单独调整。内容只读目标标准字，patch 投影后加一次二维位置编码，保留 `L` 个空间 token；没有最后的可学习查询或 CA 浓缩。风格的 SA 深度仍由 `local_depth` 控制。
 
 全部注意力使用 `nn.MultiheadAttention(batch_first=True, dropout=0.0)`，Q/K/V 投影彼此独立、有偏置，不绑定 K/V；调用时 `need_weights=False`。FFN 为 `Linear(d,int(d*mlp_ratio)) → GELU → Linear(...,d)`。普通 LN 使用 PyTorch 默认可学习仿射和 `eps=1e-5`。
 
@@ -62,10 +68,10 @@ e(t) = Linear → SiLU → Linear(e_raw(t))
 
 二维位置编码按行、列各分配 `d/2` 维，分别使用 `sin → cos` 拼接、周期基数 `10000`。位置和时间频率是固定、非持久化 buffer，不是学习参数，也不写入 `state_dict`。`time_frequency_size` 默认是定义配置类时的 `256`；单独改 `hidden_size` 不会自动改它。
 
-每个主干块依次为 `SA → 风格 CA → FFN`：
+每个主干块依次为 **`SA → Content CA → Style CA → FFN`**：
 
 - SA、FFN 使用各自的无仿射 LN（`eps=1e-6`），时间调制为 `(1+scale)*LN(x)+shift`。每块通过 `SiLU → Linear(d,6d)` 产生 `scale_sa,shift_sa,gate_sa,scale_ffn,shift_ffn,gate_ffn`，在 token 维广播；残差乘逐通道 gate，不使用 sigmoid。
-- CA 使用普通 Q/memory LN 和普通残差，读取同一份 `style`；没有独立的时间调制或零门控。它的查询已受前面 SA 的时间调制影响。
+- Content CA 读取 `L` 个内容 token，Style CA 读取 `N·Z` 个风格描述；两者使用独立的普通 Q/memory LN、MHA 和残差，没有独立时间调制或零门控。每层读取同一份内容/风格序列，查询来自该层更新中的主干特征。
 - 输出头另用 `SiLU → Linear(d,2d)` 产生 `scale,shift`，调制无仿射 LN 后，共享 `Linear(d,p²C)` 输出每块速度，再按二维位置拼回整图。没有整图压成一个 token 的步骤。
 
 各块的 `6d` 调制、输出头的 `2d` 调制及最终速度投影的权重和偏置均零初始化，其余层使用 PyTorch 默认初始化。SA/FFN 初始残差为零，CA 仍有普通残差，因而整个 block 初始不保证恒等；最终速度投影为零，因此模型初始速度输出为零。
@@ -75,27 +81,36 @@ e(t) = Linear → SiLU → Linear(e_raw(t))
 `build_flow_matching_batch` 对每个样本采样独立高斯噪声和均匀时间，也允许显式传入 `noise`、`times`：
 
 ```text
-x0 = target_standard + sigma * noise
+x0 = noise，noise ~ N(0,I)
 xt = (1-t)*x0 + t*target_handwriting
 u  = target_handwriting - x0
 L_flow = mean((predicted_velocity-u)²)
 ```
 
-同一 `x0` 用于路径和监督速度。均方误差平均全部样本、通道和像素，训练器以 FP32 计算此项。它是标准字上的加性噪声，目标手写真值不加入参考集合；路径不是已知的自然字形变形轨迹。
+同一纯噪声 `x0` 用于路径和监督速度。`build_flow_matching_batch(target_handwriting, noise=None, times=None)` 不接收标准字。均方误差平均全部样本、通道和像素，训练器以 FP32 计算此项。目标手写真值不加入参考集合；路径不是已知的自然字形变形轨迹。
 
-训练总损失为 `L_train = L_flow + author_style_loss_weight * L_author`，默认权重 `0.05`，设 `0` 关闭。`author_style_loss` 将风格 `[B,M,d]` 按每个固定槽位沿 `d` 维以 FP32 L2 归一化（`eps=1e-8`），比较同槽余弦：
+训练总损失为 **`L_train = L_flow + author_style_loss_weight * L_author`**，默认权重 `0.05`，设 `0` 关闭作者项。将描述整理为 `[B,N,Z,d]`，先按掩码对每个固定描述槽沿有效参考字求均值，得到 `[B,Z,d]`。这个均值只用于作者损失，主干仍读取全部 `N·Z` 描述；没有新增模型浓缩层。`author_style_loss(descriptions, author_ids, reference_mask=None)` 用 FP32 对该均值沿 `d` 维 L2 归一化（`eps=1e-8`），比较同槽余弦：
 
 ```text
-L_same = mean(1-cos(S_i[m],S_j[m]))，i != j 且作者相同
-L_diff = mean(cos(S_i[m],S_j[m])²)，作者不同
+A_i[z] = mean(该样本有效参考字的第 z 个描述)
+L_same = mean(1-cos(A_i[z],A_j[z]))，i != j 且作者相同
+L_diff = mean(cos(A_i[z],A_j[z])²)，作者不同
 L_author = L_same + L_diff
 ```
 
-两个配对类型分别对全部配对及槽位求平均，再相加；实现包含对称有序配对、排除自配对。缺少某种配对时该项为可微零，`B=1` 时整个作者项为零。函数还支持独立的 `same_author_weight`、`different_author_weight`，默认都为 `1`，训练器使用默认值。异作者项鼓励对应槽位正交，反向量不能作为零损失解；这并不保证完全解耦。作者配对只在每个微批次内计算，梯度累积不会扩大配对集合，采样器也不保证同作者重复出现。归一化使用 FP32，但相似度的 `einsum` 仍受当前 autocast 上下文影响。
+两个配对类型分别对全部配对及槽位求平均，再相加；实现包含对称有序配对、排除自配对。缺少某种配对时该项为可微零，`B=1` 时整个作者项为零。函数还支持独立的 `same_author_weight`、`different_author_weight`，默认都为 `1`，训练器使用默认值。异作者项鼓励对应槽位正交，反向量不能作为零损失解；这并不保证完全解耦。作者配对只在当前 batch 内计算，不跨 batch 缓存；采样器也不保证同作者重复出现。掩码求均值、归一化与相似度比较均在关闭 autocast 的 FP32 上下文计算。
 
-训练每个微批次只编码一次风格，供速度预测和作者项复用。EMA 模型在添加训练专用作者权重之前复制，因此 `val_loss_ema` **只统计 flow MSE**；它与含作者项的 `train_loss` 口径不同。
+一个 batch 只编码一次风格，供速度预测和作者项复用；每个 batch 直接更新一次优化器。验证与预览使用当前模型；`train_loss` 与 `val_loss` 均为上述双损失总目标。验证在结束后恢复模型原来的 train/eval 状态。
 
-`sample_euler` 在 `no_grad` 下编码一次参考，初始化 `x0`，用 `J=steps` 个等长步积分：`t_j=j/J`、`x←x+v(x,t_j,S)/J`（最后一次网络时间为 `(J-1)/J`）。默认噪声强度取 `model.config.sigma`，允许显式提供噪声和覆盖 `sigma`；覆盖只改变起点，没有噪声强度条件输入或效果保证，正常推理应与训练分布一致。训练状态和积分中途不裁剪，只在返回时裁剪 `[-1,1]`；函数返回归一化张量，灰度映射由预览/调用方完成。`sigma=0` 是合法的确定性对照。
+### 数据到底如何配对
+
+修改前和修改后都没有枚举所有参考集合，也没有构造跨 batch 的作者配对。每个 episode 独立均匀抽作者，再从该作者无放回抽 `N+1` 个字符，首个作目标，其余作参考。旧代码比较集合浓缩后的固定槽，现代码比较有效参考的同槽均值；作者与字符的采样方式没有改变。
+
+若一个 batch 中作者 a 出现 `k_a` 次，同作者有序对数为 `Σ k_a(k_a−1)`，异作者有序对数为 `B(B−1)−Σ k_a(k_a−1)`。例如作者序列 `[a,a,b,c]` 有 2 个同作者有序对、10 个异作者有序对（无序对为 1 和 5）。两类各自平均，不因异作者对多就直接按数量放大其权重。这里 `cos²` 是损失公式的平方，不是数据组合的平方。
+
+假设 W 个作者均匀抽样，同作者有序对数期望为 `B(B−1)/W`；作者多时，一批没有同作者对是可能的。若把同作者不同参考集合的全部配对枚举出来，组合空间会随集合数平方增长，但当前训练只比较已经抽到的 B 个 episode；两类计算均属 `O(B²·Z·d)`，没有四次方枚举。
+
+`sample_euler(model, target_standard, reference_handwriting, steps=..., noise=None, reference_mask=None)` 在 `no_grad` 下各编码一次内容和风格，从纯高斯噪声用 `J=steps` 个等长步积分：`t_j=j/J`、`x←x+v(x,t_j,content,style)/J`（最后一次网络时间为 `(J-1)/J`）。可显式传入 `noise` 复现相同起点。训练状态和积分中途不裁剪，只在返回时裁剪 `[-1,1]`；返回归一化张量，灰度映射由预览/调用方完成。
 
 ## 当前默认配置
 
@@ -104,27 +119,26 @@ L_author = L_same + L_diff
 | `ModelConfig` 字段 | 默认值 | 含义 |
 |---|---:|---|
 | `image_size` / `patch_size` / `in_channels` | `64` / `8` / `1` | 灰度图与块；网格 `8×8`，`L=64` |
-| `hidden_size` / `num_heads` / `mlp_ratio` | `256` / `8` / `4.0` | 每头维度 `32`，FFN 内宽 `1024` |
-| `local_depth` / `set_pool_depth` / `generator_depth` | `4` / `2` / `8` | 逐组 / 集合 / 主干深度 |
-| `description_tokens` / `style_tokens` | `32` / `32` | `Z` / `M` |
+| `hidden_size` / `num_heads` / `mlp_ratio` | `256` / `8` / `2.0` | 每头维度 `32`，FFN 内宽 `512` |
+| `local_depth` / `content_depth` / `generator_depth` | `8` / `8` / `8` | 单参考风格 / 内容 / 主干深度 |
+| `description_tokens` | `24` | 每个参考字的描述数 Z；默认 4 个参考产生 96 个风格 token |
 | `time_frequency_size` / `time_scale` | `256` / `1000.0` | 时间 Fourier 特征维度 / 放大倍数 |
-| `sigma` | `0.1` | 标准字加噪声强度，允许 `0` |
 
-模型要求图像边长可被块边长整除，`hidden_size` 可被头数和 `4` 整除，时间特征维为正偶数，集合深度至少 `1`；逐组和主干深度允许 `0`。默认可学习参数总数 **17,984,320**：参考编码器 **6,106,624**，主干 **11,877,696**。`count_parameters.py` 支持所有模型字段的 kebab-case 参数（如 `--hidden-size 128 --time-frequency-size 128`），仅用于统计，不改变训练配置。
+模型要求图像边长可被块边长整除，`hidden_size` 可被头数和 `4` 整除，时间特征维为正偶数；风格、内容和主干 SA 深度允许 `0`。默认可学习参数总数 **20,890,688**：参考编码器 **4,767,232**，内容编码器 **4,233,472**，主干 **11,889,984**。`count_parameters.py` 支持所有模型字段的 kebab-case 参数（如 `--hidden-size 128 --time-frequency-size 128 --content-depth 4`），仅用于统计，不改变训练配置。
 
 | `TrainingConfig` 字段 | 默认值 | 含义 |
 |---|---:|---|
-| `steps` / `batch_size` / `accumulation_steps` | `100000` / `64` / `1` | 优化器步数 / 微批量 / 累积次数 |
-| `min_references` / `max_references` | `1` / `16` | 每个 episode 均匀整数采样参考数量，端点均包含 |
+| `steps` / `batch_size` | `100000` / `64` | 优化器步数 / batch 大小，每 batch 更新一次 |
+| `min_references` / `max_references` | `4` / `4` | 当前固定 4 个参考；调整范围后均匀整数采样，包含端点 |
 | `learning_rate` / `min_lr_ratio` / `warmup_steps` | `1e-4` / `0.1` / `1000` | 基础 LR / 最低比例 / 线性预热步数 |
-| `weight_decay` / `gradient_clip` / `ema_decay` | `0.01` / `1.0` / `0.999` | AdamW 衰减 / 梯度 L2 阈值 / EMA 衰减 |
+| `weight_decay` / `gradient_clip` | `0.01` / `1.0` | AdamW 衰减 / 梯度 L2 阈值 |
 | `author_style_loss_weight` | `0.05` | 作者项相对 flow MSE 的权重 |
 | `precision` / `preload_to_gpu` / `workers` | `bf16` / `False` / `8` | CUDA 精度 / 字图常驻显存 / 训练加载 worker 数 |
-| `val_batches` / `validate_every` | `16` / `1000` | 验证微批次数 / 验证间隔 |
+| `val_batches` / `validate_every` | `16` / `1000` | 验证 batch 数 / 验证间隔 |
 | `save_every` / `log_every` | `500` / `50` | `last.pt` 保存间隔 / 日志间隔 |
 | `sample_steps` / `seed` | `32` / `42` | 预览 Euler 步数 / 种子 |
 
-有效批量为 `batch_size * accumulation_steps`（默认 `64`）；每次累积将微批损失除以累积次数。计数项须为正整数，`0<=warmup_steps<steps`、`workers>=0`、`min_references<=max_references`；LR 和裁剪阈值有限且为正，权重衰减及作者权重有限且非负，最低 LR 比例在 `[0,1]`，EMA 衰减在 `[0,1)`，精度仅接受 `fp32/fp16/bf16`，预加载开关须为布尔值。
+批量就是 `batch_size`（默认 `64`）。计数项须为正整数，`0<=warmup_steps<steps`、`workers>=0`、`min_references<=max_references`；LR 和裁剪阈值有限且为正，权重衰减及作者权重有限且非负，最低 LR 比例在 `[0,1]`，精度仅接受 `fp32/fp16/bf16`，预加载开关须为布尔值。
 
 ## 数据准备与 episode
 
@@ -132,9 +146,9 @@ L_author = L_same + L_diff
 python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0-Regular.ttf --output ../data/prepared
 ```
 
-训练说明使用文津宋体；代码不硬编码字体，实际字体由必填 `--font` 决定。LaTeX 架构图中的微软雅黑仅用于示意。
+训练说明使用文津宋体；代码不硬编码字体，实际字体由必填 `--font` 决定。
 
-准备入口的必填参数为 `--gnt-root`、`--font`、`--output`。可选参数：`--font-index 0`、`--image-size 64`（模型默认值）、`--margin 4`、`--min-characters 17`（默认 `max_references+1`）、`--val-fraction 0.1`、`--seed 42`（训练默认种子）。修改模型图像尺寸或参考上限后，应检查预处理数据是否仍满足训练要求。
+准备入口的必填参数为 `--gnt-root`、`--font`、`--output`。可选参数：`--font-index 0`、`--image-size 64`（模型默认值）、`--margin 4`、`--min-characters 5`（默认 `max_references+1`）、`--val-fraction 0.1`、`--seed 42`（训练默认种子）。修改模型图像尺寸或参考上限后，应检查预处理数据是否仍满足训练要求。
 
 - 递归读取所有 `.gnt`（后缀不区分大小写），按文件排序；每个文件视为一个作者，作者 ID 为文件 stem，要求至少两个文件且 stem 不重复。入口不自动识别官方 Test 数据，只应放入训练集 GNT。
 - GNT 的数值字段按小端解析（10 字节头，记录长度须等于 `10+width*height`）；字符直接按原始两个标签字节解码 GBK。截断、无效尺寸或非法标签会报错，不静默跳过损坏记录。
@@ -147,7 +161,7 @@ python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0
 
 每个 episode 的独立 RNG 为 `random.Random(f"{seed}:{index}")`：均匀选作者、均匀选参考数，再无放回抽 `N+1` 个不同字符，首个为目标、其余为参考。作者须有至少 `max_references+1` 个不同字符；按作者均匀采样并非按全部字图均匀采样。字图此时从 uint8 转 FP32：`pixel/127.5-1`，参考补到 `max_references` 个槽位并附布尔掩码和稳定的 manifest 作者索引。目标字符不会出现在同 episode 的参考中。
 
-episode 由种子和全局索引确定，不受 worker 数或预取进度影响。续训从 `saved_step*有效批量` 继续索引；验证使用固定索引与 `seed+1`。数据指纹是 **manifest 原始字节的 SHA-256**，连空白变化也会触发续训拒绝；加载器没有重新核验 manifest 中的 NPY/字体内容哈希，因此它不是对所有文件重新做完整性校验。
+episode 由种子和全局索引确定，不受 worker 数或预取进度影响。续训从 `saved_step*batch_size` 继续索引；验证使用固定索引与 `seed+1`。数据指纹是 **manifest 原始字节的 SHA-256**，连空白变化也会触发续训拒绝；加载器没有重新核验 manifest 中的 NPY/字体内容哈希，因此它不是对所有文件重新做完整性校验。
 
 ## 优化、验证、日志与退出
 
@@ -155,16 +169,16 @@ episode 由种子和全局索引确定，不受 worker 数或预取进度影响�
 
 CUDA 可选 BF16/FP16/FP32，启用 TF32 matmul/cuDNN；CPU 固定 FP32。只有 FP16 启用 GradScaler。先 AMP 反缩放再计算全局梯度 L2 范数，安全裁剪后更新优化器；float32 范数归约非有限时以 float64 重算。真实非有限梯度不更新参数：FP16 降低 scaler，用同一数据、时间与噪声重试，最多 `16` 次尝试；BF16/FP32 立即报错停止。非有限训练损失立即停止，不做溢出重试；异常保留已成功保存的检查点，不保证另存故障当前步。
 
-每次成功更新后 `ema ← ema_decay*ema+(1-ema_decay)*model`。每隔 `validate_every` 及计划结束步以 EMA 验证和生成预览；正常 `--stop-after 100` 也会验证、保存。验证在隔离的 PyTorch RNG 中用 `seed+10000` 固定时间/噪声，预览在全部验证损失之后采样，避免改变训练 RNG 或损失采样序列。验证 batch 数为 `val_batches`、worker 固定 `0`；loss 按样本数平均。更改精度/设备可能影响数值，代码不保证跨设备逐位一致。
+每隔 `validate_every` 及计划结束步以当前模型验证和生成预览；正常 `--stop-after 100` 也会验证、保存。验证在隔离的 PyTorch RNG 中用 `seed+10000` 固定时间/噪声，预览在全部验证损失之后采样，避免改变训练 RNG 或损失采样序列。验证 batch 数为 `val_batches`、worker 固定 `0`；双损失总目标按样本数平均。更改精度/设备可能影响数值，代码不保证跨设备逐位一致。
 
 | 输出 | 行为 |
 |---|---|
 | `run.json` | 模型/训练设置、manifest 指纹、设备、实际精度、torch 版本和当前预加载方式；续训会重写 |
-| `metrics.jsonl` | 间隔、验证和结束步追加；`train_loss`、`lr`、裁剪前 `grad_norm`、`grad_clip_scale`、可选 `val_loss_ema`，以及带 `s` 的本次启动耗时字符串 |
+| `metrics.jsonl` | 间隔、验证和结束步追加；`train_loss`、`lr`、裁剪前 `grad_norm`、`grad_clip_scale`、可选 `val_loss`，以及带 `s` 的本次启动耗时字符串 |
 | `peak_allocated`（CUDA 日志字段） | `torch.cuda.max_memory_allocated/1024³`，字符串标记 `GB`，实际为 GiB；不是 reserved memory 或本步单独峰值 |
 | `gradient_diagnostics.jsonl` | 启动/续训首步、日志间隔和计划末步记录梯度；非有限损失/梯度和 float64 回退额外记录 |
-| `previews/step_XXXXXXX.png` | 验证第一批最多四个样本，列出全部参考槽、目标标准字、真值和 EMA 生成图；补齐参考显示空白 |
-| `best.pt` | EMA flow 验证损失严格降低时保存的完整训练状态 |
+| `previews/step_XXXXXXX.png` | 验证第一批最多四个样本，列出全部参考槽、目标标准字、真值和当前模型生成图；补齐参考显示空白 |
+| `best.pt` | 当前模型双损失验证总目标严格降低时保存的完整训练状态 |
 | `last.pt` | 保存间隔及正常结束/响应退出请求时的完整训练状态，可能落后于内存中的当前步 |
 
 日志普通浮点固定八位小数，绝对值 `>=1e8` 或非零且 `<1e-7` 时用科学计数法；数字仍为 JSON number，耗时/显存为带单位字符串。诊断列出梯度最大的八个参数和直接所属模块（不是整个参考/主干递归汇总）、最大梯度元素、裁剪比例、AMP scale、尝试序号和异常参数名，Inf/NaN 以字符串保存；非有限损失事件只有相应损失/尝试信息。
@@ -180,7 +194,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --re
 
 必填 `--data`、`--output`；可选 `--resume`、`--device`（默认 `auto`：有 CUDA 则 CUDA，否则 CPU；也支持 `cuda:N`）、`--workers`、`--stop-after`。训练文件也支持从仓库根目录执行 `python DiT-flow/src/train.py ...`，参数路径仍相对当前工作目录；推荐统一从 `DiT-flow/` 运行模块入口。
 
-当前检查点版本 **2**，保存 `settings`、manifest 指纹、已完成步数、最优验证损失、当前模型、EMA、AdamW、GradScaler、CPU 和选定 CUDA 设备的 PyTorch RNG 状态。`best.pt` 也可续训，它包含当前模型和 EMA 两套权重；推理通常选用 EMA。版本 1 的旧双通道主干检查点在写输出前被明确拒绝，不能直接续训；预处理数据仍可复用。
+当前检查点版本 **3**，保存 `settings`、manifest 指纹、已完成步数、最优验证损失、当前模型、AdamW、GradScaler、CPU 和选定 CUDA 设备的 PyTorch RNG 状态。`best.pt` 也可续训，只有一套模型权重。版本 1/2 的旧架构检查点在写输出前被明确拒绝，不能直接续训；原预处理数据满足尺寸和字符数要求时仍可复用。
 
 续训恢复保存的模型与训练配置；修改当前 `config.py` 的架构、LR、种子等不会替换旧运行设置。例外是运行方式 `preload_to_gpu` 始终读取当前配置，不写入检查点 `settings`，而单独记在 `run.json`；`--device`、`--workers`、`--stop-after` 也可在续训时指定。必须满足保存步数 `< stop-after/总步数`，不能靠 `--stop-after` 延长已保存的总日程。
 
@@ -190,6 +204,6 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --re
 
 ## 计算规模与已有验证
 
-参考注意力主项为 `O(local_depth*N*L²*d + N*Z*L*d + set_pool_depth*(M*N*Z+M²)*d)`，没有全部描述的全局 SA；主干 `J` 步注意力为 `O(J*generator_depth*(L²+L*M)*d)`，还需计入投影/FFN、反向和批次成本。可复用风格减少重复参考编码，当前采样仍每步重算主干各层的风格 LN/K/V 投影；没有 K/V cache。代码使用 PyTorch MHA，具体注意力后端取决于设备、版本、dtype 等，不保证始终使用 FlashAttention。
+参考注意力主项为 `O(local_depth*N*L²*d + N*Z*L*d)`；内容为 `O(content_depth*L²*d)`；主干 `J` 步注意力为 `O(J*generator_depth*(2L²+L*N*Z)*d)`，其中两个 `L²` 分别来自 SA 和 Content CA。还需计入投影/FFN、反向和 batch 成本。缓存内容/风格编码减少重复提取，当前采样仍每步重算主干各层的内容/风格 LN/K/V 投影；没有 K/V cache。代码使用 PyTorch MHA，具体后端取决于设备、版本、dtype 等，不保证始终使用 FlashAttention。
 
 现有测试覆盖参考重排/掩码、作者损失、flow/采样、GNT 和真实字体预处理、共享内存及无文件采样、参考范围/目标排除、设备选择、日志格式、梯度溢出、保存失败以及小模型 CPU 中断续训与连续训练一致性。CUDA 设备选择测试使用模拟；这些测试不等于真实 3090 性能或生成质量验证。
