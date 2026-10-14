@@ -16,6 +16,7 @@
 | [checkpoint.py](checkpoint.py) | 训练状态与优化器动量恢复 |
 | [preview.py](preview.py) | 双向插值轨迹 GIF |
 | [generate_all.py](generate_all.py) | 加载训练检查点，为全部至少两张有效样本的汉字生成过渡与浏览总览 |
+| [play.py](play.py)、[play.html](play.html) | 本地双画板，柔边笔刷与模型过渡 GIF |
 | [count_parameters.py](count_parameters.py) | 参数统计 |
 | tests/ | 几何、数据流、梯度和混合精度验证 |
 | [train-all-pair/](train-all-pair/README.md) | 全数据集同字手写图配对训练 |
@@ -106,4 +107,28 @@ python twist/generate_all.py --checkpoint runs/twist-svf-audited/best.pt --devic
 
 ```bash
 python -m unittest discover -s twist/tests -p "test_generate_all.py" -v
+```
+
+## 本地双画板试玩
+
+在仓库根目录运行，无需安装额外界面库：
+
+```bash
+python twist/play.py
+```
+
+默认加载 `runs/twist-svf-audited/best.pt`，自动打开 `http://127.0.0.1:8765`。左侧画 A、右侧画 B，点击“生成过渡”，中间循环播放 A→B→A。画板实际为 64×64，显示放大；笔刷粗细和柔边可调，保留灰度抗锯齿。支持橡皮、撤销、清空、左右交换、示例、暂停/逐帧查看和下载 GIF。每次生成只预测一次速度场；输入按训练的逐图 min/max 归一化，不额外裁剪、居中或改变画法。
+
+使用其他已训练模型：
+
+```bash
+python twist/play.py --checkpoint runs/你的实验/best.pt --device auto
+```
+
+要求 version=3、64×64 灰度检查点。`--device auto` 自动选 CUDA/CPU，`--precision auto` 自动选 BF16/FP32；`--port 8766` 可更换端口，`--no-open` 禁止自动打开浏览器。保持启动窗口运行，结束用 Ctrl+C。画面和模型均在本机处理，不需要 prepared 数据；下载的 GIF 为 64×64 灰度动画。两侧空白或恒定图会提示先绘制。
+
+检查：
+
+```bash
+python -m unittest discover -s twist/tests -p "test_play.py" -v
 ```

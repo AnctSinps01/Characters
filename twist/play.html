@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Twist · 画两笔</title>
+<style>
+:root{--ink:#24382f;--muted:#778278;--green:#2c614c;--line:#e3e8df;--paper:#fffefb;--bg:#f3f4ee;--accent:#ebf1e7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+button,input,select{font:inherit}button,a,input,select{ -webkit-tap-highlight-color:transparent }button{cursor:pointer;border:1px solid var(--line);border-radius:10px;background:var(--paper);padding:8px 14px;color:var(--ink);transition:background .15s,transform .15s}button:hover:not(:disabled){background:var(--accent)}button:active:not(:disabled){transform:translateY(1px)}button:disabled{opacity:.42;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible{outline:3px solid #91bdaa;outline-offset:3px}
+.app{max-width:1160px;margin:0 auto;padding:34px 30px 24px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;gap:20px}.brand{display:flex;align-items:center;gap:12px}.logo{width:43px;height:43px;background:var(--green);color:white;border-radius:14px;display:grid;place-items:center;font-size:25px;font-style:italic;font-weight:600}h1{font-size:22px;letter-spacing:-.5px;margin:0}.subtitle{margin:0;color:var(--muted);font-size:13px}.connection{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:7px}.dot{width:7px;height:7px;background:#91a293;border-radius:100%}.dot.ready{background:#5e9b70}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:20px;padding:14px 20px;border:1px solid var(--line);background:#fafbf7;border-radius:14px;margin-bottom:22px}.tools{display:flex;gap:5px}.tool{padding:6px 14px;font-size:13px}.tool.active{background:var(--green);border-color:var(--green);color:white}.control{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}.control output{font-variant-numeric:tabular-nums;min-width:32px;color:var(--ink)}input[type=range]{accent-color:var(--green);width:110px;cursor:pointer}.toolbar-end{margin-left:auto;display:flex;gap:6px}.subtle{font-size:13px;padding:6px 12px;background:transparent}
+.boards{display:grid;grid-template-columns:1fr 1.08fr 1fr;gap:18px;align-items:start}.panel{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:20px;min-width:0}.panel.middle{box-shadow:0 8px 28px #283c2d09;border-color:#cddbc8}.panel-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.panel-title{font-size:15px;font-weight:600}.badge{font-size:11px;color:var(--muted);padding:3px 9px;border:1px solid var(--line);border-radius:100px}.canvas-wrap,.stage{aspect-ratio:1;background:white;border:1px solid #edf0e9;border-radius:10px;overflow:hidden;position:relative}.canvas-wrap canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none;image-rendering:auto}.stage{display:grid;place-items:center}.stage img{width:100%;height:100%;object-fit:contain;image-rendering:auto}.empty{text-align:center;color:#929c90;font-size:13px;padding:20px}.empty svg{display:block;margin:0 auto 12px;opacity:.7}.busy-indicator{position:absolute;inset:0;background:#fffffff0;display:grid;place-items:center;color:var(--green);font-size:13px}.spinner{width:26px;height:26px;border:2px solid #dce7d7;border-top-color:var(--green);border-radius:100%;animation:spin .9s linear infinite;margin:0 auto 12px}@keyframes spin{to{transform:rotate(360deg)}}
+.panel-actions{display:flex;justify-content:space-between;align-items:center;margin-top:15px}.panel-actions button{border:0;padding:4px 7px;font-size:12px;color:var(--muted);background:transparent}.hint{font-size:12px;color:#9ba395}.timeline{display:flex;align-items:center;gap:10px;margin-top:15px;min-height:26px}.timeline input{width:100%;min-width:0}.time{font-size:12px;min-width:47px;font-variant-numeric:tabular-nums;color:var(--muted)}.playback{display:flex;gap:8px;margin-top:10px;justify-content:center}.playback button,.download{font-size:12px;padding:6px 12px}.download{color:var(--green);border:1px solid var(--line);border-radius:10px;text-decoration:none}.download.disabled{opacity:.42;pointer-events:none}
+.bottom{display:flex;justify-content:center;align-items:center;gap:14px;margin:26px 0 10px}.generate{background:var(--green);border-color:var(--green);color:white;font-weight:600;padding:11px 30px;min-width:170px}.generate:hover:not(:disabled){background:#224c3b}.options{font-size:13px;color:var(--muted);display:flex;gap:7px;align-items:center}.options select{border:1px solid var(--line);border-radius:8px;background:transparent;padding:5px 7px;color:var(--ink)}#status{text-align:center;min-height:27px;color:var(--muted);font-size:13px;margin:0}#status.error{color:#ae493c}.footer{color:#9ba395;text-align:center;font-size:12px;margin:18px 0 0}[hidden]{display:none!important}
+@media(max-width:760px){.app{padding:22px 15px}header{margin-bottom:20px}.toolbar{gap:12px;padding:12px}.toolbar-end{margin-left:0}.control{gap:5px}.control input{width:75px}.boards{gap:10px}.panel{padding:10px;border-radius:12px}.panel-head{margin-bottom:10px}.badge{display:none}.panel-title{font-size:13px}.hint{display:none}.playback{flex-wrap:wrap;gap:4px}.playback button,.download{padding:4px 8px}.timeline{gap:4px}.time{font-size:10px;min-width:42px}.empty{padding:10px;font-size:11px}.empty svg{width:30px}.bottom{flex-wrap:wrap;margin-top:20px}.connection{max-width:130px;text-align:right;font-size:11px}.subtitle{font-size:12px}}
+@media(max-width:430px){.boards{grid-template-columns:1fr 1fr}.middle{grid-column:1 / -1;grid-row:2;max-width:280px;width:100%;justify-self:center}.right{grid-column:2;grid-row:1}.toolbar-end{margin-left:auto}.canvas-wrap{border-radius:6px}.panel-actions{margin-top:8px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand"><div class="logo" aria-hidden="true">t</div><div><h1>画两笔，看看它怎么变</h1><p class="subtitle">左边是起点，右边是终点。中间交给 Twist。</p></div></div>
+    <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">正在连接模型</span></div>
+  </header>
+  <section class="toolbar" aria-label="画笔工具">
+    <div class="tools"><button id="pen" class="tool active" aria-pressed="true">画笔</button><button id="eraser" class="tool" aria-pressed="false">橡皮</button></div>
+    <label class="control">粗细 <input id="width" type="range" min="1" max="10" step=".5" value="4" aria-label="笔刷粗细"><output id="width-value">4 px</output></label>
+    <label class="control">柔边 <input id="softness" type="range" min="0" max=".95" step=".05" value=".6" aria-label="笔刷柔边"><output id="softness-value">60%</output></label>
+    <div class="toolbar-end"><button id="example" class="subtle">试个例子</button><button id="swap" class="subtle">左右交换 ⇄</button><button id="clear-both" class="subtle">清空两边</button></div>
+  </section>
+  <main class="boards">
+    <section class="panel left">
+      <div class="panel-head"><span class="panel-title">A · 从这里出发</span><span class="badge">64 × 64</span></div>
+      <div class="canvas-wrap"><canvas id="left" width="64" height="64" tabindex="0" aria-label="左侧画板 A"></canvas></div>
+      <div class="panel-actions"><span class="hint">鼠标 / 触控绘制</span><div><button id="undo-left">撤销</button><button id="clear-left">清空</button></div></div>
+    </section>
+    <section class="panel middle">
+      <div class="panel-head"><span class="panel-title">过渡</span><span class="badge">A ⇄ B</span></div>
+      <div class="stage">
+        <div id="empty" class="empty"><svg width="45" height="45" viewBox="0 0 45 45" fill="none" aria-hidden="true"><path d="M8 28C8 14 34 31 36 17M8 16l0 12 12 0M36 29l0-12-12 0" stroke="#719375" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>画好两边，点击生成<br>这里会播放过渡动画</div>
+        <img id="result" alt="模型生成的过渡画面" hidden>
+        <div id="busy" class="busy-indicator" hidden><div><div class="spinner"></div>正在让两幅画相遇…</div></div>
+      </div>
+      <div class="timeline"><input id="timeline" type="range" min="0" max="20" value="0" disabled aria-label="过渡进度"><span id="time" class="time">t = 0.00</span></div>
+      <div class="playback"><button id="play" disabled>暂停</button><a id="download" class="download disabled" download="twist-transition.gif" aria-disabled="true">下载 GIF</a></div>
+    </section>
+    <section class="panel right">
+      <div class="panel-head"><span class="panel-title">B · 变成这样</span><span class="badge">64 × 64</span></div>
+      <div class="canvas-wrap"><canvas id="right" width="64" height="64" tabindex="0" aria-label="右侧画板 B"></canvas></div>
+      <div class="panel-actions"><span class="hint">柔和笔刷，灰度保留</span><div><button id="undo-right">撤销</button><button id="clear-right">清空</button></div></div>
+    </section>
+  </main>
+  <div class="bottom"><button id="generate" class="generate" disabled>生成过渡</button><label class="options">帧数 <select id="frames"><option value="21">21</option><option value="41">41</option><option value="61">61</option></select></label><label class="options">速度 <select id="fps"><option value="8">慢</option><option value="12" selected>适中</option><option value="20">快</option></select></label></div>
+  <p id="status" role="status" aria-live="polite">在左右画板各画几笔，也可以先试个例子。</p>
+  <p class="footer">画面只在本机处理 · 按 Ctrl / ⌘ + Z 撤销当前画板</p>
+</div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id), SIZE = 64;
+let tool = 'pen', activeBoard = null, generating = false, ready = false, animation = null, playing = false, timer = null, sequencePosition = 0, generationRevision = 0;
+function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
+function changed() { generationRevision++; if (animation) status('画板已修改，点击「生成过渡」更新中间动画。'); }
+class Board {
+  constructor(id) {
+    this.id = id; this.canvas = $(id); this.context = this.canvas.getContext('2d');
+    this.ink = new Float32Array(SIZE * SIZE); this.history = []; this.previous = null; this.pointer = null;
+    this.paint();
+    this.canvas.addEventListener('pointerdown', event => {
+      if (generating || (event.pointerType === 'mouse' && event.button !== 0) || this.pointer !== null) return;
+      event.preventDefault(); activeBoard = this; this.canvas.focus({preventScroll:true}); this.remember();
+      this.pointer = event.pointerId; this.canvas.setPointerCapture(event.pointerId);
+      this.previous = this.point(event); this.stroke(this.previous, this.previous); this.paint();
+    });
+    this.canvas.addEventListener('pointermove', event => {
+      if (event.pointerId !== this.pointer) return;
+      event.preventDefault(); const samples = event.getCoalescedEvents ? event.getCoalescedEvents() : [event];
+      for (const sample of samples.length ? samples : [event]) { const point = this.point(sample); this.stroke(this.previous, point); this.previous = point; }
+      this.paint();
+    });
+    const finish = event => {
+      if (event.pointerId !== this.pointer) return;
+      this.pointer = null; this.previous = null; changed();
+    };
+    for (const name of ['pointerup','pointercancel','lostpointercapture']) this.canvas.addEventListener(name, finish);
+    $('clear-' + id).addEventListener('click', () => {
+      if (generating) return;
+      this.remember(); this.ink.fill(0); this.paint(); changed(); clearTransition();
+      status(`已清空${id === 'left' ? '左侧' : '右侧'}画板和过渡，画好后可重新生成。`);
+    });
+    $('undo-' + id).addEventListener('click', () => this.undo());
+  }
+  point(event) { const bounds = this.canvas.getBoundingClientRect(); return {x:Math.max(0,Math.min(SIZE,(event.clientX-bounds.left)*SIZE/bounds.width)),y:Math.max(0,Math.min(SIZE,(event.clientY-bounds.top)*SIZE/bounds.height))}; }
+  remember() { this.history.push(this.ink.slice()); if (this.history.length > 40) this.history.shift(); }
+  undo() { if (generating || !this.history.length) return; this.ink = this.history.pop(); this.paint(); changed(); }
+  stroke(a, b, diameter = Number($('width').value), softness = Number($('softness').value), erase = tool === 'eraser') {
+    // Coverage is computed from distance to a line segment at the actual 64px resolution.
+    // Max coverage avoids hardening the soft edge when pointer samples overlap.
+    const radius = diameter/2, core = radius*(1-softness), dx = b.x-a.x, dy = b.y-a.y, length = dx*dx+dy*dy;
+    const x0 = Math.max(0,Math.floor(Math.min(a.x,b.x)-radius)), x1 = Math.min(SIZE-1,Math.ceil(Math.max(a.x,b.x)+radius));
+    const y0 = Math.max(0,Math.floor(Math.min(a.y,b.y)-radius)), y1 = Math.min(SIZE-1,Math.ceil(Math.max(a.y,b.y)+radius));
+    for (let y=y0;y<=y1;y++) for (let x=x0;x<=x1;x++) {
+      const projection = length ? Math.max(0,Math.min(1,((x+.5-a.x)*dx+(y+.5-a.y)*dy)/length)) : 0;
+      const distance = Math.hypot(x+.5-a.x-projection*dx,y+.5-a.y-projection*dy);
+      if (distance >= radius) continue;
+      const edge = softness > 0 ? Math.max(0,Math.min(1,(distance-core)/(radius-core))) : 0;
+      const coverage = 1-edge*edge*(3-2*edge), index = y*SIZE+x;
+      this.ink[index] = erase ? Math.min(this.ink[index],1-coverage) : Math.max(this.ink[index],coverage);
+    }
+  }
+  paint() {
+    const image = this.context.createImageData(SIZE,SIZE);
+    for (let i=0;i<this.ink.length;i++) { const gray = Math.round(255*(1-this.ink[i])); image.data[i*4] = image.data[i*4+1] = image.data[i*4+2] = gray; image.data[i*4+3] = 255; }
+    this.context.putImageData(image,0,0); $('undo-' + this.id).disabled = !this.history.length || generating;
+  }
+  values() { return Array.from(this.ink, value => Math.round(255*(1-value))); }
+}
+const left = new Board('left'), right = new Board('right');
+for (const name of ['pen','eraser']) $(name).addEventListener('click', () => {
+  tool = name; for (const choice of ['pen','eraser']) { $(choice).classList.toggle('active', choice === name); $(choice).setAttribute('aria-pressed', choice === name); }
+});
+$('width').addEventListener('input', () => $('width-value').textContent = $('width').value + ' px');
+$('softness').addEventListener('input', () => $('softness-value').textContent = Math.round(Number($('softness').value)*100) + '%');
+$('swap').addEventListener('click', () => { left.remember(); right.remember(); const ink = left.ink; left.ink = right.ink; right.ink = ink; left.paint(); right.paint(); changed(); });
+$('clear-both').addEventListener('click', () => {
+  if (generating) return;
+  left.remember(); right.remember(); left.ink.fill(0); right.ink.fill(0);
+  left.paint(); right.paint(); changed(); clearTransition();
+  status('两边画板和过渡已清空，可以重新画；点击各自的「撤销」可恢复画板。');
+});
+$('example').addEventListener('click', () => {
+  left.remember(); right.remember(); left.ink.fill(0); right.ink.fill(0);
+  for (const [board,offset] of [[left,-4],[right,4]]) {
+    board.stroke({x:31+offset,y:12},{x:32+offset,y:52},4.5,.65,false);
+    board.stroke({x:14,y:29+offset/2},{x:50,y:30+offset/2},4.5,.65,false); board.paint();
+  }
+  changed(); status('已画好一个例子，点击「生成过渡」看看效果。');
+});
+document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z' && activeBoard) { event.preventDefault(); activeBoard.undo(); } });
+function setBusy(value) {
+  generating = value; $('busy').hidden = !value; $('generate').textContent = value ? '正在生成…' : '生成过渡'; $('generate').disabled = value || !ready;
+  for (const id of ['pen','eraser','width','softness','swap','example','clear-both','frames','fps','clear-left','clear-right']) $(id).disabled = value;
+  left.paint(); right.paint();
+}
+function showFrame(index) { $('result').src = animation.frames[index]; $('timeline').value = index; $('time').textContent = 't = ' + animation.times[index].toFixed(2); }
+function stopPlayback() { clearTimeout(timer); timer = null; playing = false; $('play').textContent = '播放'; }
+function clearTransition() {
+  stopPlayback(); animation = null; sequencePosition = 0;
+  $('result').hidden = true; $('result').removeAttribute('src'); $('empty').hidden = false;
+  $('timeline').disabled = true; $('timeline').value = 0; $('time').textContent = 't = 0.00';
+  $('play').disabled = true; $('download').removeAttribute('href');
+  $('download').classList.add('disabled'); $('download').setAttribute('aria-disabled','true');
+}
+function playSequence() {
+  if (!animation) return; playing = true; $('play').textContent = '暂停';
+  const tick = () => { if (!playing) return; showFrame(animation.sequence[sequencePosition]); timer = setTimeout(() => { sequencePosition = (sequencePosition+1)%animation.sequence.length; tick(); }, animation.durations[sequencePosition]); }; tick();
+}
+$('play').addEventListener('click', () => { if (playing) stopPlayback(); else playSequence(); });
+$('timeline').addEventListener('input', () => { stopPlayback(); const index = Number($('timeline').value); sequencePosition = animation.sequence.indexOf(index); showFrame(index); });
+$('generate').addEventListener('click', async () => {
+  if (generating || !ready) return;
+  if (!left.ink.some(value => value > .01) || !right.ink.some(value => value > .01)) { status('请在左右画板各画几笔，再生成过渡。',true); return; }
+  stopPlayback(); setBusy(true); status('模型正在生成过渡，请稍等。'); const revision = generationRevision;
+  try {
+    const response = await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:left.values(),target:right.values(),frames:Number($('frames').value),fps:Number($('fps').value)})});
+    const result = await response.json(); if (!response.ok) throw new Error(result.error || '生成失败');
+    animation = result; sequencePosition = 0; $('empty').hidden = true; $('result').hidden = false;
+    $('timeline').disabled = false; $('timeline').max = animation.frames.length-1; $('play').disabled = false;
+    $('download').href = result.gif; $('download').classList.remove('disabled'); $('download').setAttribute('aria-disabled','false');
+    playSequence(); status(revision === generationRevision ? `生成完成，用时 ${result.seconds.toFixed(2)} 秒。可以暂停、拖动进度，或继续改画。` : '画板已修改，点击「生成过渡」更新中间动画。');
+  } catch (error) { status(error.message || '连接失败，请确认启动窗口仍然打开。',true); }
+  finally { setBusy(false); }
+});
+fetch('/api/info').then(response => { if (!response.ok) throw new Error(); return response.json(); }).then(info => {
+  ready = true; $('connection-dot').classList.add('ready'); $('connection').textContent = '本地模型已就绪';
+  $('connection').title = `${info.checkpoint} · step ${info.step}`; $('generate').disabled = false;
+}).catch(() => { $('connection').textContent = '模型未连接'; status('请通过 Python 脚本启动画板，并保持启动窗口打开。',true); });
+</script>
+</body>
+</html>

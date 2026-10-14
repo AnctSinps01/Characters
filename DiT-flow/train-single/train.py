@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from runpy import run_path
 import sys
 
 # This entry point also works from Characters without changing directory.
@@ -11,4 +12,5 @@ from src.train import main
 
 
 if __name__ == "__main__":
-    main(single_writer=True)
+    subset_size = run_path(str(Path(__file__).with_name("config.py")))["SUBSET_SIZE"]
+    main(single_writer=True, subset_size=subset_size)

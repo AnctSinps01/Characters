@@ -189,7 +189,8 @@ class HandwritingEpisodes(Dataset):
     def __init__(self, root: str | Path, split: str, *, length: int,
                  min_references: int, max_references: int, seed: int,
                  preloaded: PreloadedGlyphs | None = None,
-                 writer_id: str | None = None):
+                 writer_id: str | None = None,
+                 writer_sample_indices: list[int] | None = None):
         self.root = Path(root)
         self._preloaded = preloaded if preloaded is not None else PreloadedGlyphs(self.root)
         if self._preloaded.root != self.root.resolve():
@@ -217,6 +218,16 @@ class HandwritingEpisodes(Dataset):
             labels = writer["labels"]
             if len(set(labels)) != len(labels) or len(labels) <= max_references:
                 raise ValueError(f"writer {writer['id']} needs distinct target + references")
+        self.writer_sample_indices = None
+        if writer_sample_indices is not None:
+            if writer_id is None:
+                raise ValueError("writer_sample_indices requires a single writer_id")
+            indices = tuple(writer_sample_indices)
+            if (len(indices) <= max_references or len(set(indices)) != len(indices)
+                    or any(type(index) is not int or not 0 <= index < len(self.writers[0]["labels"])
+                           for index in indices)):
+                raise ValueError("writer subset needs distinct, valid target + reference indices")
+            self.writer_sample_indices = indices
         self.length = length
         self.min_references = min_references
         self.max_references = max_references
@@ -237,7 +248,9 @@ class HandwritingEpisodes(Dataset):
             raise RuntimeError("dataset is closed")
         images = self._preloaded.writer_images(writer["id"])
         count = rng.randint(self.min_references, self.max_references)
-        selected = rng.sample(range(len(writer["labels"])), count + 1)
+        pool = (self.writer_sample_indices if self.writer_sample_indices is not None
+                else range(len(writer["labels"])))
+        selected = rng.sample(pool, count + 1)
         labels = writer["labels"]
 
         # Gather the whole episode at once instead of converting each glyph in

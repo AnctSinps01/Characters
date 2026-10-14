@@ -90,6 +90,36 @@ class SingleWriterTests(unittest.TestCase):
                 choose(writer_id)
         self.assertIsNone(choose(checkpoint={}, single=False))
 
+    def test_subset_limits_are_clamped_fixed_nested_and_do_not_change_training_rng(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture_data(root)
+            manifest, _ = read_manifest(root)
+            _, config = tiny_settings()
+            def choose(size, checkpoint=None):
+                return select_data(manifest, config, single_writer=True, writer_id=None,
+                                   checkpoint=checkpoint, subset_size=size)
+            before = torch.get_rng_state().clone()
+            small, larger, all_chars = choose(3), choose(6), choose(1000)
+            self.assertEqual(small["subset_size"], 3)
+            self.assertEqual(small["character_count"], 9)
+            self.assertEqual(small, choose(3))
+            self.assertTrue(set(small["subset_indices"]) <= set(larger["subset_indices"]))
+            self.assertEqual(all_chars["subset_size"], 9)
+            self.assertEqual(all_chars["subset_indices"], list(range(9)))
+            torch.testing.assert_close(torch.get_rng_state(), before, rtol=0, atol=0)
+            # Local edits apply to new experiments, not an existing checkpoint.
+            self.assertEqual(choose(8, {"data_selection": small}), small)
+            legacy = choose(None)
+            self.assertEqual(choose(3, {"data_selection": legacy}), legacy)
+            for size in (0, -1, True, 1.5, 2):
+                with self.subTest(size=size), self.assertRaises(ValueError):
+                    choose(size)
+            for indices in ([0, 0, 1], [-1, 1, 2], [0, 1, 9], [0, 1]):
+                bad = {**small, "subset_indices": indices, "subset_size": len(indices)}
+                with self.subTest(indices=indices), self.assertRaises(ValueError):
+                    choose(3, {"data_selection": bad})
+
     def test_selected_preload_and_episodes_only_use_chosen_author_and_keep_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "data"
@@ -142,6 +172,56 @@ class SingleWriterTests(unittest.TestCase):
             self.assertFalse(is_unstarted_run(root, settings, "fingerprint", data_selection={
                 "mode": "single_writer_fit", "writer_id": "small",
             }))
+
+    def test_subset_restricts_targets_and_references_for_training_preview_and_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "data"
+            fixture_data(root)
+            before = (root / "manifest.json").read_bytes()
+            store = PreloadedGlyphs(root, writer_ids=("rich",))
+            indices = [1, 4, 8]
+            datasets = [HandwritingEpisodes(root, split, length=24, min_references=1,
+                                             max_references=2, seed=seed,
+                                             preloaded=store, writer_id="rich",
+                                             writer_sample_indices=indices)
+                        for split, seed in (("train", 42), ("val", 43))]
+            for dataset in datasets:
+                observed = set()
+                for index in range(len(dataset)):
+                    episode = dataset[index]
+                    target = round(((episode["target_handwriting"][0, 0, 0].item() + 1) * 127.5 - 2) / 18)
+                    standard = round((episode["target_standard"][0, 0, 0].item() + 1) * 127.5 / 18)
+                    references = [round(((pixel.item() + 1) * 127.5 - 2) / 18)
+                                  for pixel in episode["reference_handwriting"][episode["reference_mask"], 0, 0, 0]]
+                    self.assertEqual(target, standard)
+                    self.assertIn(target, indices)
+                    self.assertTrue(set(references) <= set(indices))
+                    self.assertNotIn(target, references)
+                    self.assertEqual(len(references), len(set(references)))
+                    observed.update([target, *references])
+                self.assertEqual(observed, set(indices))
+            for direct, worker in zip(DataLoader(datasets[0], batch_size=3, num_workers=0),
+                                      DataLoader(datasets[0], batch_size=3, num_workers=1,
+                                                 multiprocessing_context="spawn")):
+                for key in direct:
+                    torch.testing.assert_close(direct[key], worker[key], rtol=0, atol=0)
+            self.assertEqual((root / "manifest.json").read_bytes(), before)
+            for dataset in datasets:
+                dataset.close()
+
+    def test_subset_too_small_fails_before_creating_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            fixture_data(data)
+            model, config = tiny_settings()
+            args = argparse.Namespace(data=data, output=root / "invalid", resume=None,
+                                      device="cpu", workers=0, stop_after=None, writer_id=None)
+            with patch("src.train.ModelConfig", return_value=model), \
+                 patch("src.train.TrainingConfig", return_value=config):
+                with self.assertRaisesRegex(ValueError, "at least 3"):
+                    run(args, single_writer=True, subset_size=2)
+            self.assertFalse(args.output.exists())
 
     def test_single_author_training_preview_and_resume_match_uninterrupted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,9 +285,43 @@ class SingleWriterTests(unittest.TestCase):
         shared_run.assert_called_once()
         args = shared_run.call_args.args[0]
         self.assertTrue(shared_run.call_args.kwargs["single_writer"])
+        local_config = runpy.run_path(str(implementation / "train-single/config.py"))
+        self.assertEqual(shared_run.call_args.kwargs["subset_size"], local_config["SUBSET_SIZE"])
         self.assertEqual(args.data, Path("data/prepared"))
         self.assertEqual(args.stop_after, 10000)
         self.assertIsNone(args.writer_id)
+
+    def test_subset_resume_keeps_saved_pool_and_matches_uninterrupted_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            fixture_data(data)
+            model, config = tiny_settings()
+            args = argparse.Namespace(data=data, output=root / "full", resume=None,
+                                      device="cpu", workers=0, stop_after=None, writer_id=None)
+            with redirect_stdout(io.StringIO()):
+                with patch("src.train.ModelConfig", return_value=model), \
+                     patch("src.train.TrainingConfig", return_value=config):
+                    run(args, single_writer=True, subset_size=4)
+                    args.output, args.stop_after = root / "split", 1
+                    run(args, single_writer=True, subset_size=4)
+                args.resume, args.stop_after = args.output / "last.pt", None
+                run(args, single_writer=True, subset_size=8)
+            full = torch.load(root / "full/last.pt", weights_only=True)
+            resumed = torch.load(root / "split/last.pt", weights_only=True)
+            self.assertEqual(resumed["data_selection"], full["data_selection"])
+            self.assertEqual(resumed["data_selection"]["subset_size"], 4)
+            self.assertEqual(len(resumed["data_selection"]["subset_indices"]), 4)
+            for name in full["model"]:
+                torch.testing.assert_close(full["model"][name], resumed["model"][name], rtol=0, atol=0)
+            torch.testing.assert_close(full["cpu_rng"], resumed["cpu_rng"], rtol=0, atol=0)
+            for key, state in full["optimizer"]["state"].items():
+                for name, value in state.items():
+                    torch.testing.assert_close(value, resumed["optimizer"]["state"][key][name],
+                                               rtol=0, atol=0)
+            metadata = json.loads((root / "split/run.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["data_selection"], resumed["data_selection"])
+            self.assertTrue((root / "split/previews/step_0000003.png").is_file())
 
 
 if __name__ == "__main__":

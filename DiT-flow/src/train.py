@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import shutil
 import signal
 import sys
@@ -306,8 +307,14 @@ def comparable_settings(settings):
 
 
 def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
-                writer_id: str | None, checkpoint: dict | None) -> dict | None:
+                writer_id: str | None, checkpoint: dict | None,
+                subset_size: int | None = None) -> dict | None:
     """Choose fitting data once; a resume must keep the saved selection."""
+    if subset_size is not None:
+        if not single_writer:
+            raise ValueError("subset_size is only supported for single-author fitting")
+        if type(subset_size) is not int or subset_size < 1:
+            raise ValueError("SUBSET_SIZE must be a positive integer")
     saved = checkpoint.get("data_selection") if checkpoint is not None else None
     if checkpoint is not None:
         if not single_writer:
@@ -342,12 +349,30 @@ def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
     selection = {"mode": "single_writer_fit", "writer_id": writer["id"],
                  "character_count": len(writer["labels"]),
                  "evaluation": "same_writer_seen_characters"}
+    if checkpoint is not None and "subset_indices" in saved:
+        indices = saved["subset_indices"]
+        if (not isinstance(indices, list) or not indices
+                or any(type(index) is not int or not 0 <= index < len(writer["labels"])
+                       for index in indices)
+                or len(set(indices)) != len(indices)):
+            raise ValueError("checkpoint has invalid single-author subset indices")
+        selection.update(subset_size=len(indices), subset_indices=indices)
+    elif checkpoint is None and subset_size is not None:
+        count = min(subset_size, len(writer["labels"]))
+        # Shuffle the full pool once so smaller limits give nested subsets.
+        # A private RNG leaves training noise/time sampling untouched.
+        indices = list(range(len(writer["labels"])))
+        random.Random(f"{config.seed}:single-writer:{writer['id']}").shuffle(indices)
+        selection.update(subset_size=count, subset_indices=sorted(indices[:count]))
+    if selection.get("subset_size", selection["character_count"]) <= config.max_references:
+        raise ValueError(f"single-author subset needs at least {config.max_references + 1} "
+                         "characters for distinct target + references; increase SUBSET_SIZE")
     if checkpoint is not None and selection != saved:
         raise ValueError("single-author data selection differs from checkpoint")
     return selection
 
 
-def run(args, *, single_writer: bool = False):
+def run(args, *, single_writer: bool = False, subset_size: int | None = None):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
@@ -384,6 +409,7 @@ def run(args, *, single_writer: bool = False):
     data_selection = select_data(
         manifest, config, single_writer=single_writer,
         writer_id=getattr(args, "writer_id", None), checkpoint=checkpoint,
+        subset_size=subset_size,
     )
     completed = checkpoint["step"] if checkpoint else 0
     stop_step = min(config.steps, args.stop_after or config.steps)
@@ -426,7 +452,8 @@ def run(args, *, single_writer: bool = False):
     }, indent=2), encoding="utf-8")
     if data_selection is not None:
         print(f"Single-author fitting: writer={data_selection['writer_id']}, "
-              f"characters={data_selection['character_count']}; "
+              f"characters={data_selection.get('subset_size', data_selection['character_count'])}"
+              f"/{data_selection['character_count']}; "
               "evaluation uses the same writer and training character pool.", flush=True)
     torch.manual_seed(config.seed)
     if device.type == "cuda":
@@ -457,7 +484,9 @@ def run(args, *, single_writer: bool = False):
     if preloaded.fingerprint != fingerprint:
         raise ValueError("prepared manifest changed during startup")
     common = dict(min_references=config.min_references, max_references=config.max_references,
-                  preloaded=preloaded, writer_id=selected_writer)
+                  preloaded=preloaded, writer_id=selected_writer,
+                  writer_sample_indices=(data_selection.get("subset_indices")
+                                         if data_selection is not None else None))
     training = HandwritingEpisodes(args.data, "train", length=config.steps * episodes_per_step,
                                    seed=config.seed, **common)
     validation = HandwritingEpisodes(args.data, "val", length=config.val_batches * config.batch_size,
@@ -550,7 +579,7 @@ def run(args, *, single_writer: bool = False):
     print(f"Saved step {completed}: {args.output / 'last.pt'}", flush=True)
 
 
-def main(*, single_writer: bool = False):
+def main(*, single_writer: bool = False, subset_size: int | None = None):
     description = "Fit one automatically selected training writer." if single_writer else __doc__
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--data", type=Path, required=True)
@@ -564,7 +593,7 @@ def main(*, single_writer: bool = False):
     args = parser.parse_args()
     if args.stop_after is not None and args.stop_after < 1:
         parser.error("--stop-after must be positive")
-    run(args, single_writer=single_writer)
+    run(args, single_writer=single_writer, subset_size=subset_size)
 
 
 if __name__ == "__main__":
