@@ -61,7 +61,7 @@ class TrainingConfig:
     """Edit these defaults for a new run; resume restores saved settings."""
 
     steps: int = 1_000_000
-    batch_size: int = 64
+    batch_size: int = 32
     min_references: int = 4              # 参考字数下限
     max_references: int = 4              # 参考字数上限
     learning_rate: float = 1e-4
