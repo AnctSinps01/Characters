@@ -23,8 +23,8 @@ from torch.utils.data import DataLoader
 from src.prepare_data import prepare
 from src import Glyph2Hand, ModelConfig, TrainingConfig
 from src.data import HandwritingEpisodes, PreloadedGlyphs, iter_gnt, normalize_image, read_manifest
-from src.train import (evaluate, is_unstarted_run, learning_rate, metrics_json,
-                       optimizer_update, resolve_device, run)
+from src.train import (evaluate, is_unstarted_run, learning_rate, make_grad_scaler,
+                       metrics_json, optimizer_update, resolve_device, run)
 
 
 def record(character="啊", width=5, height=7):
@@ -343,7 +343,8 @@ class TrainingTests(unittest.TestCase):
     def test_scaler_overflow_retries_without_advancing_optimizer_or_noise(self):
         model = torch.nn.Linear(1, 1)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scaler = torch.amp.GradScaler("cpu", init_scale=2.0**120)
+        scaler = make_grad_scaler(torch.device("cpu"), enabled=True,
+                                  init_scale=2.0**120)
         config = TrainingConfig()
         noises = []
 

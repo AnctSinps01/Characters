@@ -54,6 +54,21 @@ def autocast_context(device, precision):
     return torch.autocast(device_type=device.type, dtype=dtype)
 
 
+def make_grad_scaler(device: torch.device, *, enabled: bool, **kwargs):
+    """Construct GradScaler across PyTorch's old and unified AMP APIs."""
+    amp = getattr(torch, "amp", None)
+    scaler_type = getattr(amp, "GradScaler", None)
+    if scaler_type is not None:
+        try:
+            return scaler_type(device.type, enabled=enabled, **kwargs)
+        except TypeError:
+            # A short-lived compatibility version accepted only keyword args.
+            return scaler_type(enabled=enabled, **kwargs)
+    # PyTorch versions before the unified torch.amp.GradScaler API expose the
+    # CUDA implementation here. The trainer only enables scaling on CUDA FP16.
+    return torch.cuda.amp.GradScaler(enabled=enabled, **kwargs)
+
+
 def move_batch(batch, device):
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
@@ -465,7 +480,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None):
     model.author_style_loss_weight = config.author_style_loss_weight
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
                                   betas=(0.9, 0.95), weight_decay=config.weight_decay)
-    scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
+    scaler = make_grad_scaler(device, enabled=precision == "fp16")
     best = float("inf")
     if checkpoint:
         model.load_state_dict(checkpoint["model"])

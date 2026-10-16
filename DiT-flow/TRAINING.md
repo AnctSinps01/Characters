@@ -32,7 +32,7 @@ python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0
 
 模型和训练参数直接改 `src/config.py`。当前默认每样本 4 个参考，调整 `min_references`/`max_references` 后在范围内均匀整数抽样。图像尺寸和参考上限请在处理数据前确定。每 batch 更新一次；风格只读手写字，目标标准字经独立内容编码器提取 token，主干从纯高斯噪声生成。训练为 flow MSE 加作者损失（默认权重 `0.05`）：对有效参考的同描述槽取均值后，同作者用 `1-cosine`、异作者用 `cosine²`。只比较当前 batch，不缓存跨 batch 配对；完整配对数量与公式见 [README](README.md)。
 
-训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。更新训练代码后无需重新 prepare。
+训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。训练器兼容 PyTorch 2.3 的 `torch.cuda.amp.GradScaler` 和新版本的 `torch.amp.GradScaler`，更新训练代码后无需重新 prepare。
 
 ```bash
 python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --device cuda --stop-after 100

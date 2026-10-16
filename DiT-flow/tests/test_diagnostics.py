@@ -10,7 +10,7 @@ import torch
 
 from src.config import TrainingConfig
 from src.diagnostics import GradientSnapshot
-from src.train import optimizer_update
+from src.train import make_grad_scaler, optimizer_update
 
 
 class GradientDiagnosticTests(unittest.TestCase):
@@ -79,7 +79,7 @@ class GradientDiagnosticTests(unittest.TestCase):
         model = torch.nn.Linear(1, 1)
         before = copy.deepcopy(model.state_dict())
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scaler = torch.amp.GradScaler("cpu", enabled=False)
+        scaler = make_grad_scaler(torch.device("cpu"), enabled=False)
         reports = []
         with patch("src.train.batch_loss", side_effect=lambda model, batch:
                    InfiniteBackward.apply(model.weight).sum()):
@@ -95,7 +95,7 @@ class GradientDiagnosticTests(unittest.TestCase):
     def test_nonfinite_loss_is_logged_without_backward(self):
         model = torch.nn.Linear(1, 1)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scaler = torch.amp.GradScaler("cpu", enabled=False)
+        scaler = make_grad_scaler(torch.device("cpu"), enabled=False)
         reports = []
         with patch("src.train.batch_loss", return_value=torch.tensor(float("inf"))):
             with self.assertRaisesRegex(FloatingPointError, "non-finite training loss"):
