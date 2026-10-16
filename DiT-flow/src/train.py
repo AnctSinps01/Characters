@@ -28,7 +28,6 @@ from torch.utils.data import DataLoader
 from . import (
     Glyph2Hand,
     ModelConfig,
-    author_style_loss,
     build_flow_matching_batch,
     flow_matching_loss,
     sample_euler,
@@ -106,19 +105,7 @@ def batch_loss(model, batch):
         flow.state, flow.times, content, style, batch["reference_mask"]
     )
     # Accumulate the MSE in float32 even under autocast.
-    loss = flow_matching_loss(prediction.float(), flow.target_velocity.float())
-    style_weight = getattr(model, "author_style_loss_weight", 0.0)
-    if style_weight:
-        if "author_index" not in batch:
-            raise ValueError("author_style_loss_weight requires author_index in each batch")
-        grouped = style.reshape(
-            style.shape[0], batch["reference_handwriting"].shape[1],
-            model.config.description_tokens, model.config.hidden_size,
-        )
-        loss = loss + style_weight * author_style_loss(
-            grouped, batch["author_index"], reference_mask=batch["reference_mask"]
-        )
-    return loss
+    return flow_matching_loss(prediction.float(), flow.target_velocity.float())
 
 
 def optimizer_update(model, optimizer, scaler, raw, device, precision, config,
@@ -323,19 +310,13 @@ def comparable_settings(settings):
 
 def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
                 writer_id: str | None, checkpoint: dict | None,
-                subset_size: int | None = None,
-                style_hidden_loss_enabled: bool | None = None) -> dict | None:
+                subset_size: int | None = None) -> dict | None:
     """Choose fitting data once; a resume must keep the saved selection."""
     if subset_size is not None:
         if not single_writer:
             raise ValueError("subset_size is only supported for single-author fitting")
         if type(subset_size) is not int or subset_size < 1:
             raise ValueError("SUBSET_SIZE must be a positive integer")
-    if style_hidden_loss_enabled is not None:
-        if not single_writer:
-            raise ValueError("style_hidden_loss_enabled is only supported for single-author fitting")
-        if type(style_hidden_loss_enabled) is not bool:
-            raise ValueError("ENABLE_STYLE_HIDDEN_LOSS must be a bool")
     saved = checkpoint.get("data_selection") if checkpoint is not None else None
     if checkpoint is not None:
         if not single_writer:
@@ -345,12 +326,6 @@ def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
         if not isinstance(saved, dict) or saved.get("mode") != "single_writer_fit":
             raise ValueError("train-single requires a single-author checkpoint to resume")
         saved = dict(saved)
-        saved.setdefault("style_hidden_loss", True)
-        if type(saved["style_hidden_loss"]) is not bool:
-            raise ValueError("checkpoint has invalid style_hidden_loss setting")
-        # A checkpoint owns the behavior of its unfinished run. Editing the
-        # local config must not silently change a resumed optimization.
-        style_hidden_loss_enabled = saved["style_hidden_loss"]
         if writer_id is not None and writer_id != saved.get("writer_id"):
             raise ValueError("writer-id differs from the saved single-author selection")
         writer_id = saved.get("writer_id")
@@ -376,9 +351,7 @@ def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
         writer = matches[0]
     selection = {"mode": "single_writer_fit", "writer_id": writer["id"],
                  "character_count": len(writer["labels"]),
-                 "evaluation": "same_writer_seen_characters",
-                 "style_hidden_loss": (True if style_hidden_loss_enabled is None
-                                        else style_hidden_loss_enabled)}
+                 "evaluation": "same_writer_seen_characters"}
     if checkpoint is not None and "subset_indices" in saved:
         indices = saved["subset_indices"]
         if (not isinstance(indices, list) or not indices
@@ -402,17 +375,16 @@ def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
     return selection
 
 
-def run(args, *, single_writer: bool = False, subset_size: int | None = None,
-        style_hidden_loss_enabled: bool | None = None):
+def run(args, *, single_writer: bool = False, subset_size: int | None = None):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
-    if checkpoint is not None and checkpoint.get("version") in (1, 2):
+    if checkpoint is not None and checkpoint.get("version") in (1, 2, 3, 4):
         raise ValueError(
-            "old checkpoint architecture is incompatible with content/style CA and pure-noise flow; "
+            "old checkpoint architecture or settings are incompatible with this trainer; "
             "start a new run without --resume in a new output directory"
         )
-    if checkpoint is not None and checkpoint.get("version") != 3:
+    if checkpoint is not None and checkpoint.get("version") != 5:
         raise ValueError("unsupported checkpoint version")
     if checkpoint is not None:
         settings = checkpoint["settings"]
@@ -441,7 +413,6 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         manifest, config, single_writer=single_writer,
         writer_id=getattr(args, "writer_id", None), checkpoint=checkpoint,
         subset_size=subset_size,
-        style_hidden_loss_enabled=style_hidden_loss_enabled,
     )
     completed = checkpoint["step"] if checkpoint else 0
     stop_step = min(config.steps, args.stop_after or config.steps)
@@ -466,12 +437,6 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
     if checkpoint and (args.output / "run.json").exists():
         previous = json.loads((args.output / "run.json").read_text(encoding="utf-8"))
         previous_selection = previous.get("data_selection")
-        if (data_selection is not None and isinstance(previous_selection, dict)
-                and previous_selection.get("mode") == "single_writer_fit"):
-            # Single-author checkpoints created before this switch defaulted to
-            # the enabled behavior and did not store the field in run.json.
-            previous_selection = dict(previous_selection)
-            previous_selection.setdefault("style_hidden_loss", True)
         if comparable_settings(previous["settings"]) != comparable_settings(settings) \
                 or previous["data_fingerprint"] != fingerprint \
                 or previous_selection != data_selection:
@@ -499,11 +464,6 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     model = Glyph2Hand(model_config).to(device).train()
-    # Keep this runtime-only: it is restored from TrainingConfig and should not
-    # become a model parameter or alter the checkpoint state-dict format.
-    model.author_style_loss_weight = config.author_style_loss_weight
-    if data_selection is not None and not data_selection["style_hidden_loss"]:
-        model.author_style_loss_weight = 0.0
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
                                   betas=(0.9, 0.95), weight_decay=config.weight_decay)
     scaler = make_grad_scaler(device, enabled=precision == "fp16")
@@ -553,7 +513,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
 
     def save(name):
         atomic_save({
-            "version": 3, "settings": settings, "data_fingerprint": fingerprint,
+            "version": 5, "settings": settings, "data_fingerprint": fingerprint,
             "data_selection": data_selection,
             "step": completed, "best_val_loss": best,
             "model": model.state_dict(),
@@ -620,8 +580,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
     print(f"Saved step {completed}: {args.output / 'last.pt'}", flush=True)
 
 
-def main(*, single_writer: bool = False, subset_size: int | None = None,
-         style_hidden_loss_enabled: bool | None = None):
+def main(*, single_writer: bool = False, subset_size: int | None = None):
     description = "Fit one automatically selected training writer." if single_writer else __doc__
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--data", type=Path, required=True)
@@ -635,8 +594,7 @@ def main(*, single_writer: bool = False, subset_size: int | None = None,
     args = parser.parse_args()
     if args.stop_after is not None and args.stop_after < 1:
         parser.error("--stop-after must be positive")
-    run(args, single_writer=single_writer, subset_size=subset_size,
-        style_hidden_loss_enabled=style_hidden_loss_enabled)
+    run(args, single_writer=single_writer, subset_size=subset_size)
 
 
 if __name__ == "__main__":

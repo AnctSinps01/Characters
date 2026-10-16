@@ -90,34 +90,6 @@ class SingleWriterTests(unittest.TestCase):
                 choose(writer_id)
         self.assertIsNone(choose(checkpoint={}, single=False))
 
-    def test_style_hidden_loss_switch_is_single_writer_only_and_saved_on_resume(self):
-        _, config = tiny_settings()
-        manifest = {"writers": [
-            {"id": "rich", "labels": list(range(9)), "split": "train"},
-        ]}
-        disabled = select_data(manifest, config, single_writer=True, writer_id=None,
-                               checkpoint=None, subset_size=4,
-                               style_hidden_loss_enabled=False)
-        self.assertFalse(disabled["style_hidden_loss"])
-        self.assertEqual(
-            select_data(manifest, config, single_writer=True, writer_id=None,
-                        checkpoint={"data_selection": disabled}, subset_size=16,
-                        style_hidden_loss_enabled=True),
-            disabled,
-        )
-        legacy = dict(disabled)
-        legacy.pop("style_hidden_loss")
-        resumed_legacy = select_data(manifest, config, single_writer=True, writer_id=None,
-                                     checkpoint={"data_selection": legacy}, subset_size=16,
-                                     style_hidden_loss_enabled=False)
-        self.assertTrue(resumed_legacy["style_hidden_loss"])
-        with self.assertRaisesRegex(ValueError, "only supported"):
-            select_data(manifest, config, single_writer=False, writer_id=None,
-                        checkpoint=None, style_hidden_loss_enabled=False)
-        with self.assertRaisesRegex(ValueError, "must be a bool"):
-            select_data(manifest, config, single_writer=True, writer_id=None,
-                        checkpoint=None, style_hidden_loss_enabled=1)
-
     def test_subset_limits_are_clamped_fixed_nested_and_do_not_change_training_rng(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "data"
@@ -167,7 +139,6 @@ class SingleWriterTests(unittest.TestCase):
             for dataset in datasets:
                 for index in range(len(dataset)):
                     item = dataset[index]
-                    self.assertEqual(item["author_index"].item(), 1)
                     target_pixel = item["target_handwriting"][0, 0, 0]
                     reference_pixels = item["reference_handwriting"][item["reference_mask"], 0, 0, 0]
                     self.assertFalse((reference_pixels == target_pixel).any())
@@ -283,7 +254,6 @@ class SingleWriterTests(unittest.TestCase):
             self.assertEqual(resumed["data_selection"], saved["data_selection"])
             self.assertEqual(resumed["data_selection"]["writer_id"], "rich")
             self.assertEqual(resumed["data_selection"]["character_count"], 9)
-            self.assertEqual(resumed["settings"]["training"]["author_style_loss_weight"], 0.05)
             self.assertEqual(resumed["step"], 3)
             for name in full["model"]:
                 torch.testing.assert_close(full["model"][name], resumed["model"][name], rtol=0, atol=0)
@@ -315,8 +285,6 @@ class SingleWriterTests(unittest.TestCase):
         self.assertTrue(shared_run.call_args.kwargs["single_writer"])
         local_config = runpy.run_path(str(implementation / "train-single/config.py"))
         self.assertEqual(shared_run.call_args.kwargs["subset_size"], local_config["SUBSET_SIZE"])
-        self.assertEqual(shared_run.call_args.kwargs["style_hidden_loss_enabled"],
-                         local_config["ENABLE_STYLE_HIDDEN_LOSS"])
         self.assertEqual(args.data, Path("data/prepared"))
         self.assertEqual(args.stop_after, 10000)
         self.assertIsNone(args.writer_id)

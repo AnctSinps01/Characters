@@ -15,6 +15,7 @@ class ModelConfig:
     num_heads: int = 8
     mlp_ratio: float = 2.0                  # FNN hidden dim
     local_depth: int = 8                    # 单参考手写字 SA 层数
+                                            # 当前设置只有固定一层 CA 风格浓缩。
     content_depth: int = 8                  # 目标标准字 SA 层数，独立调整
     generator_depth: int = 8                # 主干层数
     description_tokens: int = 16            # 单字描述 token 数
@@ -69,7 +70,6 @@ class TrainingConfig:
     warmup_steps: int = 1_000
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
-    author_style_loss_weight: float = 0.05  # 作者损失比例
     precision: str = "bf16"
     preload_to_gpu: bool = False            # 放进显存 | 放进内存
     workers: int = 4
@@ -95,9 +95,6 @@ class TrainingConfig:
         for name in ("learning_rate", "gradient_clip"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if (not math.isfinite(self.author_style_loss_weight)
-                or self.author_style_loss_weight < 0):
-            raise ValueError("author_style_loss_weight must be finite and nonnegative")
         if not 0 <= self.min_lr_ratio <= 1:
             raise ValueError("invalid min_lr_ratio")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:

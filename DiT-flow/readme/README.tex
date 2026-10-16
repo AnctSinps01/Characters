@@ -35,7 +35,7 @@
 \vspace{4pt}
 {\large 纯噪声 flow：独立内容编码与多参考风格条件}\par
 \vspace{3pt}
-{\small 2026 年 10 月 10 日\quad 当前架构与训练实现，检查点版本 3}
+{\small 2026 年 10 月 10 日\quad 当前架构与训练实现，检查点版本 5}
 \end{center}
 
 \section{任务与当前实现}
@@ -48,7 +48,7 @@
 风格分支将每个参考字独立浓缩为 $Z$ 个描述，然后直接拼接。
 内容分支采用相同的 patch/SA 结构，参数与 SA 深度独立，不做最后的 CA 浓缩。
 主干堆叠 \textbf{SA $\to$ Content CA $\to$ Style CA $\to$ FFN}。
-训练使用 flow MSE 和作者风格损失，每个 batch 更新一次；验证、预览使用当前模型。
+训练和验证只使用 flow MSE，每个 batch 更新一次；验证、预览使用当前模型。
 完整配置、运行命令、日志与 I/O 处理见上一级 \code{README.md} 和 \code{TRAINING.md}。
 \code{README.v1-with-diagrams.*} 为历史设计；本文描述代码行为，不提供生成质量结论。
 
@@ -92,8 +92,8 @@
 \node[contentbox] (content) at (14,-4.9) {内容 $C_\star$：$L\times d$\\保留全部空间 token\\不做 CA 浓缩};
 \node[stylebox] (style) at (2,-6.7) {每字 $Z$ 个描述直接拼接\\$U$：$NZ\times d$\\无参考集合浓缩};
 \node[flowbox] (sa) at (8,-7.4) {SA\\AdaLN-Zero + 残差门};
-\node[flowbox] (cca) at (8,-9.2) {Content CA\\普通 LN + 残差};
-\node[flowbox] (sca) at (8,-11) {Style CA\\普通 LN + 残差\\屏蔽补齐描述};
+\node[flowbox] (cca) at (8,-9.2) {Content CA\\普通 LN + LayerScale};
+\node[flowbox] (sca) at (8,-11) {Style CA\\普通 LN + LayerScale\\屏蔽补齐描述};
 \node[flowbox] (ffn) at (8,-12.8) {FFN\\AdaLN-Zero + 残差门};
 \node[timebox] (time) at (14,-12.8) {$t\to$ sin/cos $\to$ MLP\\各块独立 $6d$ 时间调制\\作用于 SA / FFN};
 \node[flowbox] (head) at (8,-14.8) {时间调节 LN + 共享输出投影\\$d\to Cp^2$，按位置拼回速度};
@@ -119,7 +119,7 @@ fit=(sa)(cca)(sca)(ffn),inner sep=10pt] {};
 \end{tikzpicture}}
 \end{center}
 {\small 风格、内容和状态均在 patch 投影后加一次位置编码；风格浓缩查询及描述不加位置编码。
-图中的 CA 表示主干独立注意力子层；风格浓缩模块含一层 CA 和一个 FFN，均有前置 LN 与残差。}
+图中的 CA 表示主干独立注意力子层；风格浓缩模块含一层 CA 和一个 FFN，均有前置 LN 与 LayerScale 残差。LayerScale 是不依赖时间的可学习逐通道残差系数，初值为 $10^{-4}$。}
 
 \clearpage
 \section{风格与内容编码}
@@ -130,12 +130,13 @@ R_i=E_s\bigl(\operatorname{Patch}_s(H_i)+P_{xy}\bigr)\in\mathbb R^{L\times d},
 \qquad U_i=\operatorname{Pool}(Q_Z,R_i)\in\mathbb R^{Z\times d}.
 \]
 每字独立编码，各字共享 patch 投影、$B_s=\code{local_depth}$ 个 SA--FFN 块和可学习查询 $Q_Z$。
-每个 SA--FFN 子层采用普通前置 LN 与残差，FFN 为两层线性映射，中间 GELU。
+每个 SA--FFN 子层采用普通前置 LN 与 LayerScale 残差，FFN 为两层线性映射，中间 GELU。
 \textbf{Pool 中恰好只有一层 CA}，随后一个 FFN：
 \begin{align*}
-\widetilde Q&=Q_Z+\MHA(\LN_q(Q_Z),\LN_r(R_i),\LN_r(R_i)),\\
-U_i&=\widetilde Q+\FFN(\LN_f(\widetilde Q)).
+\widetilde Q&=Q_Z+\gamma_{\rm ca}\odot\MHA(\LN_q(Q_Z),\LN_r(R_i),\LN_r(R_i)),\\
+U_i&=\widetilde Q+\gamma_{\rm ffn}\odot\FFN(\LN_f(\widetilde Q)).
 \end{align*}
+$\gamma_{\rm ca}$ 和 $\gamma_{\rm ffn}$ 是初值为 $10^{-4}$ 的可学习逐通道 LayerScale。
 $Q_Z$ 是共享训练参数，以标准差 $0.02$ 的正态分布初始化；查询和浓缩输出均不添加位置编码。
 浓缩后不再做自注意力，不保留原始空间 token 旁路。
 直接拼接 $U=[U_1;\ldots;U_N]$，主干读取全部 $NZ$ 个描述，没有集合浓缩层或其他汇总查询。
@@ -172,11 +173,11 @@ $B_c=\code{content_depth}$ 可单独调整；不执行最后的 Pool，保持空
 \begin{align*}
 A&=D_s(T),\\
 T_s&=T+g_s\odot\MHA_s(A,A,A),\\
-T_c&=T_s+\MHA_c(\LN_{cq}(T_s),\LN_{ck}(C_\star),\LN_{ck}(C_\star)),\\
-T_u&=T_c+\MHA_u(\LN_{uq}(T_c),\LN_{uk}(U),\LN_{uk}(U)),\\
+T_c&=T_s+\gamma_c\odot\MHA_c(\LN_{cq}(T_s),\LN_{ck}(C_\star),\LN_{ck}(C_\star)),\\
+T_u&=T_c+\gamma_s\odot\MHA_u(\LN_{uq}(T_c),\LN_{uk}(U),\LN_{uk}(U)),\\
 T^+&=T_u+g_f\odot\FFN(D_f(T_u)).
 \end{align*}
-Content CA 和 Style CA 参数独立，均为普通前置 LN 和残差，没有单独的时间调节或零门。
+Content CA 和 Style CA 参数独立，均为普通前置 LN 和静态 LayerScale 残差，没有单独的时间调节；$\gamma_c,\gamma_s$ 初值为 $10^{-4}$，并在训练中学习。
 SA 和 FFN 的 LN 无仿射，$\varepsilon=10^{-6}$；普通 LN 有可学习仿射，$\varepsilon=10^{-5}$。
 所有 MHA 为 batch-first、dropout $0$、带 bias，Q/K/V 独立投影，不绑定 K/V，调用不返回注意力权重。
 
@@ -186,9 +187,9 @@ $F$ 为时间特征维，$\tau$ 为时间放大倍数。二维位置按行/列�
 位置和频率为非持久化 buffer，不写入 state dict。
 
 输出头用独立 SiLU--Linear 产生 $2d$ 个 scale/shift，调节无仿射 LN，再共享线性投影为每块 $Cp^2$ 个速度并拼回图像。
-主干 $6d$ 调制、输出头 $2d$ 调制和速度投影均零初始化；初始速度为零，普通 CA 仍有残差，整个 block 不保证恒等。
+主干 $6d$ 调制、输出头 $2d$ 调制和速度投影均零初始化；LayerScale 初值为 $10^{-4}$，初始速度为零，主干块从接近恒等的残差更新开始。
 
-\section{双损失与作者配对方式}
+\section{flow 损失}
 
 \subsection{纯噪声 flow MSE}
 
@@ -199,43 +200,11 @@ x_0&=\epsilon,\qquad x_t=(1-t)\epsilon+tH_\star,\qquad u=H_\star-\epsilon,\\
 \end{align*}
 训练器用 float32 平均样本、通道和像素的平方误差，不裁剪训练状态。
 标准字只进入内容编码，参考字只进入风格编码；两者与主干共同反向训练。
-
-\subsection{作者风格损失}
-
-将 $U$ 整理为 $[B,N,Z,d]$。作者损失先对有效参考的同描述槽取均值：
+训练和验证都只统计 flow MSE，训练目标为
 \[
-A_{i,z}=\frac{\sum_r m_{i,r}U_{i,r,z}}{\sum_r m_{i,r}},\qquad
-\bar A_{i,z}=\frac{A_{i,z}}{\max(\|A_{i,z}\|_2,10^{-8})},\qquad
-c_{ijz}=\bar A_{i,z}^{\top}\bar A_{j,z}.
+\mathcal L_{\rm train}=\mathcal L_{\rm flow}.
 \]
-\textbf{这个均值只用于计算损失，主干依然读取全部 $NZ$ 个描述。}
-没有为作者损失增加可学习集合浓缩层。均值、归一化及相似度比较均在关闭 autocast 的 float32 上下文计算。
-设作者索引为 $a_i$，取当前 batch 的有序配对
-$P_s=\{(i,j):i\ne j,a_i=a_j\}$、$P_d=\{(i,j):a_i\ne a_j\}$：
-\begin{align*}
-\mathcal L_s&=\frac{1}{|P_s|Z}\sum_{(i,j)\in P_s}\sum_z(1-c_{ijz}),\\
-\mathcal L_d&=\frac{1}{|P_d|Z}\sum_{(i,j)\in P_d}\sum_z c_{ijz}^2,\\
-\mathcal L_{\rm author}&=\mathcal L_s+\mathcal L_d,\qquad
-\mathcal L_{\rm train}=\mathcal L_{\rm flow}+0.05\,\mathcal L_{\rm author}\quad\text{（默认）}.
-\end{align*}
-两类分别平均，再相加；缺少某类时对应项为保持梯度连接的零。单样本 batch 作者项为零。
-函数支持两类独立非负权重，默认均为 $1$；总作者项权重可在训练配置修改，$0$ 可关闭。
-同作者鼓励一致，异作者鼓励正交，相反方向不是零损失解。
-训练与验证均统计当前模型的双损失总目标，日志为 \code{train_loss} 和 \code{val_loss}。
-
-\subsection{为什么没有二次方、四次方的数据枚举}
-
-修改前的数据采样：每个 episode 独立均匀选作者，再从作者无放回抽 $N+1$ 个不同字符，
-首个为目标，余下为参考。旧作者损失比较集合浓缩后的固定槽，且只在当次 batch 内配对，
-没有跨 batch 缓存、专门保证同作者重复的采样，或对全部参考集合做组合枚举。
-修改后保留相同采样方式，只改为上述同槽均值表示。
-
-一个 batch 的作者出现次数为 $k_a$ 时，同作者有序对数为
-$\sum_a k_a(k_a-1)$，异作者为 $B(B-1)-\sum_a k_a(k_a-1)$。
-例如作者 $[a,a,b,c]$ 有 $2$ 个同作者、$10$ 个异作者有序对；两类各自取平均。
-均匀选择 $W$ 个作者时，同作者有序对的期望为 $B(B-1)/W$，一批完全没有同作者配对是可能的。
-全量枚举不同参考集合的配对空间可以很大，但代码只比较已抽到的 $B$ 个 episode，
-两类相似度计算都是 $O(B^2Zd)$，没有四次方枚举。异作者公式中的平方是余弦值平方，不是采样次数平方。
+每个 batch 更新一次优化器；日志中的 \code{train_loss} 和 \code{val_loss} 都是该 MSE。
 
 \section{配置与采样}
 
@@ -248,13 +217,13 @@ $\sum_a k_a(k_a-1)$，异作者为 $B(B-1)-\sum_a k_a(k_a-1)$。
 \code{hidden_size / num_heads / mlp_ratio} & $256/8/2$ & 每头 $32$，FFN 内宽 $512$ \\
 \code{local_depth / content_depth} & $8/8$ & 风格、内容 SA 深度独立 \\
 \code{generator_depth} & $8$ & 双 CA 主干深度 \\
-\code{description_tokens} & $24$ & 每字 $Z$ 个描述 \\
+\code{description_tokens} & $16$ & 每字 $Z$ 个描述 \\
 \code{time_frequency_size / time_scale} & $256/1000$ & 时间编码维度与倍数 \\
 \bottomrule
 \end{tabularx}\end{center}
 图像边长须整除 patch 边长，$d$ 可被头数和 $4$ 整除，时间特征维为正偶数，三个 SA 深度允许为 $0$。
 时间特征维默认在类定义时确定为 $256$，单独改 $d$ 不会自动同步。
-默认参数总数 $20{,}890{,}688$：参考 $4{,}767{,}232$，内容 $4{,}233{,}472$，主干 $11{,}889{,}984$。
+默认参数总数 $20{,}901{,}440$：参考 $4{,}769{,}792$，内容 $4{,}237{,}568$，主干 $11{,}894{,}080$，其中包含初值为 $10^{-4}$ 的 LayerScale 参数。
 
 \begin{center}\small
 \begin{tabularx}{\linewidth}{@{}l l X@{}}
@@ -262,11 +231,10 @@ $\sum_a k_a(k_a-1)$，异作者为 $B(B-1)-\sum_a k_a(k_a-1)$。
 训练字段 & 默认值 & 含义 \\
 \midrule
 \code{steps / batch_size} & $100000/64$ & 每 batch 一次优化器更新 \\
-\code{min_references / max_references} & $4/4$ & 默认 $NZ=96$；可设数量范围 \\
+\code{min_references / max_references} & $4/4$ & 默认 $NZ=64$；可设数量范围 \\
 \code{learning_rate / min_lr_ratio} & $10^{-4}/0.1$ & 基础 LR 与最终比例 \\
 \code{warmup_steps} & $1000$ & 线性预热后余弦衰减 \\
 \code{weight_decay / gradient_clip} & $0.01/1$ & AdamW 衰减与全局 L2 阈值 \\
-\code{author_style_loss_weight} & $0.05$ & 作者项权重 \\
 \code{precision / preload_to_gpu / workers} & BF16 / False / $8$ & 精度与数据存放方式 \\
 \code{val_batches / validate_every} & $16/1000$ & 验证批数与间隔 \\
 \code{save_every / log_every} & $500/50$ & 保存与日志间隔 \\
@@ -287,42 +255,4 @@ t_j=j/J,\qquad x_{j+1}=x_j+J^{-1}v_\theta(x_j,t_j,C_\star,U),\quad j=0,\ldots,J-
 只在返回时裁剪 $[-1,1]$，灰度映射由调用方完成。可提供固定 noise 复现实验。
 没有额外随机积分量；内容和风格每次采样各编码一次，主干每步仍重算各层 memory LN/K/V，没有 K/V cache。
 
-\section{数据、验证与恢复}
-
-从 \code{DiT-flow/} 运行 \code{python -m src.prepare_data}，必填 GNT 根目录、字体和输出路径。
-默认边长 $64$、边距 $4$、字体索引 $0$、最少字符数 $5$、验证比例 $0.1$、种子 $42$。
-每个 GNT 文件视为作者，文件 stem 是 ID，要求至少两个文件且 ID 不重复；数值字段小端、标签按 GBK 解码。
-保留字体支持的基本 CJK 单字，去除重复、空白与字符数不足作者；损坏记录直接报错。
-手写和标准字紧裁白背景、保持宽高比、LANCZOS 缩放居中，无随机图像增强。
-只应提供训练集文件，代码不自动识别官方 Test 文件。
-
-按作者划分 train/val，验证人数为 $\min(W-1,\max(1,\operatorname{round}(0.1W)))$（默认比例）。
-作者不重叠，字符类别可以重叠；保存 uint8 NPY 和最后写入的版本 $1$ manifest。
-训练和验证全部字图预加载一份：CPU 使用 RawArray 供 worker 共享；CUDA 常驻则强制 worker 为 $0$。
-episode 独立随机数由种子与全局索引确定，续训从 saved step 乘 batch size 继续索引，验证用 seed 加一的固定 episode。
-每字图转为 pixel/127.5-1，参考补白并附掩码和稳定作者索引；不再返回参考标准字。
-数据指纹为 manifest 原始字节 SHA-256，不重新核验记录的 NPY/字体内容哈希。
-旧预处理数据满足尺寸及最大参考数加一个不同字符时可复用。
-
-验证每隔固定间隔及计划末步进行，使用当前模型双损失与预览，结束恢复 train/eval 状态。
-隔离 RNG、使用 seed 加 $10000$ 固定时间/噪声，全部损失算完再采样预览。
-\code{--stop-after} 是绝对优化器步数，不改 LR 总日程。训练循环响应 SIGINT/SIGTERM：
-完成当前更新后跳过验证并保存 last；强杀或一般异常不保证保存当前步。
-
-检查点版本为 \textbf{3}，仅保存当前模型、AdamW、GradScaler、PyTorch RNG、配置、数据指纹、步数和最优验证值。
-版本 $1/2$ 架构不兼容，在写输出前拒绝恢复；使用新目录重新训练。
-best 在当前模型验证总目标严格改善时保存；last 按间隔及结束保存，可能落后于内存当前步。
-恢复采用保存超参数，运行开关 \code{preload_to_gpu} 读取当前配置，设备、worker 与提前终点可由命令行指定。
-新训练拒绝非空结果；续训旧目录配置/指纹须一致，且已有 last 不得比选中恢复点新。
-保存先写临时文件、flush/fsync 再替换；I/O 错误最多三次尝试，间隔 $1$、$2$ 秒，不重复训练。
-刷新 best 与 last 不是整体事务，存储需额外一份完整检查点空间。
-
-\section{计算规模与验证边界}
-
-参考主要注意力成本为 $O(B_sNL^2d+NZLd)$，内容为 $O(B_cL^2d)$，
-$J$ 步主干为 $O(JB_g(2L^2+LNZ)d)$，另需计入投影、FFN、batch 与反向。
-实际参考计算按补齐槽数计；PyTorch MHA 后端由环境决定，不保证使用 FlashAttention。
-现有测试覆盖双条件结构与梯度、执行顺序、位置编码、掩码/重排、作者配对平均、纯噪声 flow 与缓存采样，
-以及数据共享、预处理、诊断、写入失败和 CPU 小模型续训一致性。
-模拟设备测试与 CPU 回归不能替代真实 GPU 性能及生成质量实验。
 \end{document}

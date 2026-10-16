@@ -30,7 +30,7 @@ python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0
 
 ## 4. 先训练 100 步
 
-模型和训练参数直接改 `src/config.py`。当前默认每样本 4 个参考，调整 `min_references`/`max_references` 后在范围内均匀整数抽样。图像尺寸和参考上限请在处理数据前确定。每 batch 更新一次；风格只读手写字，目标标准字经独立内容编码器提取 token，主干从纯高斯噪声生成。训练为 flow MSE 加作者损失（默认权重 `0.05`）：对有效参考的同描述槽取均值后，同作者用 `1-cosine`、异作者用 `cosine²`。只比较当前 batch，不缓存跨 batch 配对；完整配对数量与公式见 [README](README.md)。
+模型和训练参数直接改 `src/config.py`。当前默认每样本 4 个参考，调整 `min_references`/`max_references` 后在范围内均匀整数抽样。图像尺寸和参考上限请在处理数据前确定。每 batch 更新一次；风格只读手写字，目标标准字经独立内容编码器提取 token，主干从纯高斯噪声生成。训练和验证目标均为 flow MSE，完整公式见 [README](README.md)。
 
 训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。训练器兼容 PyTorch 2.3 的 `torch.cuda.amp.GradScaler` 和新版本的 `torch.amp.GradScaler`，更新训练代码后无需重新 prepare。
 
@@ -43,7 +43,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 | 文件 | 内容 |
 |---|---|
 | `last.pt` | 最近一次成功保存的完整训练状态，用于续训；保存间隔内可能落后于当前步 |
-| `best.pt` | 当前模型双损失验证总目标最低时的完整训练状态 |
+| `best.pt` | 当前模型 flow MSE 验证目标最低时的完整训练状态 |
 | `metrics.jsonl` | 训练日志 |
 | `gradient_diagnostics.jsonl` | 裁剪前梯度诊断：范数最大的参数/模块、最大梯度元素、裁剪比例与非有限值位置 |
 | `run.json` | 本次配置 |
@@ -53,7 +53,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 
 续训使用检查点保存的配置；修改 `src/config.py` 中的模型和训练超参数只影响新训练。运行方式开关 `preload_to_gpu` 例外，始终读取当前配置；`--device`、`--workers` 和 `--stop-after` 也可以在续训时指定。`--stop-after` 是绝对优化器步数，不改变保存的总步数或学习率日程。
 
-当前架构为纯噪声 flow、独立内容编码、未浓缩的多参考风格序列和双 CA 主干，检查点版本为 3。版本 1/2 权重结构不兼容，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的灰度预处理数据只要尺寸与字符数量满足配置即可复用，目标标准字作为内容条件，参考字不再配标准字。
+当前架构为纯噪声 flow、独立内容编码、未浓缩的多参考风格序列和双 CA 主干，检查点版本为 5。版本 1/2/3/4 权重或训练设置不兼容，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的灰度预处理数据只要尺寸与字符数量满足配置即可复用，目标标准字作为内容条件，参考字不再配标准字。
 
 ```bash
 python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --resume ../runs/DiT-flow/first/last.pt --device cuda

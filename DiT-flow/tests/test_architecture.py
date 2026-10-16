@@ -5,13 +5,14 @@ import unittest
 from unittest.mock import patch
 
 import torch
-from torch.nn import functional as F
 
 from src import (
-    Glyph2Hand, ModelConfig, TrainingConfig, author_style_loss,
+    Glyph2Hand, ModelConfig, TrainingConfig,
     build_flow_matching_batch, flow_matching_loss, sample_euler,
 )
-from src.layers import AdaLNZeroDiTBlock, CrossAttentionBlock, PatchEmbed2D
+from src.layers import (
+    AdaLNZeroDiTBlock, CrossAttentionBlock, PatchEmbed2D, SelfAttentionBlock,
+)
 from src.train import batch_loss
 
 
@@ -86,6 +87,26 @@ class ArchitectureTests(unittest.TestCase):
                 handle.remove()
         self.assertEqual(observed, ["SA", "Content CA", "Style CA", "FFN"])
 
+    def test_static_layer_scales_are_small_and_learnable(self):
+        encoder_block = SelfAttentionBlock(32, 4, 2.0)
+        pool_block = CrossAttentionBlock(32, 4, 2.0)
+        generator_block = AdaLNZeroDiTBlock(32, 4, 2.0)
+        for parameter in (
+            encoder_block.attention_scale,
+            encoder_block.mlp_scale,
+            pool_block.attention_scale,
+            pool_block.mlp_scale,
+            generator_block.content_scale,
+            generator_block.style_scale,
+        ):
+            self.assertTrue(parameter.requires_grad)
+            torch.testing.assert_close(
+                parameter, torch.full_like(parameter, 1e-4), rtol=0, atol=0
+            )
+        modulation = generator_block.modulation[-1]
+        self.assertTrue(torch.equal(modulation.weight, torch.zeros_like(modulation.weight)))
+        self.assertTrue(torch.equal(modulation.bias, torch.zeros_like(modulation.bias)))
+
     def test_reference_permutation_and_padding_do_not_change_conditioned_velocity(self):
         torch.manual_seed(7)
         model = Glyph2Hand(tiny_config()).eval()
@@ -114,48 +135,6 @@ class ArchitectureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             model.encode_style(refs, torch.zeros_like(mask))
 
-    def test_author_loss_exact_pair_means_and_reference_order_invariance(self):
-        torch.manual_seed(3)
-        tokens = torch.randn(4, 3, 2, 5, requires_grad=True)
-        authors = torch.tensor([0, 0, 1, 2])
-        mask = torch.tensor([[1, 0, 1], [1, 1, 0], [0, 1, 0], [1, 1, 1]], dtype=torch.bool)
-        summary = torch.stack([tokens[i, mask[i]].mean(0) for i in range(4)])
-        normalized = F.normalize(summary, dim=-1, eps=1e-8)
-        same, different = [], []
-        for i in range(4):
-            for j in range(4):
-                if i != j:
-                    cosine = (normalized[i] * normalized[j]).sum(-1)
-                    (same if authors[i] == authors[j] else different).append(
-                        1 - cosine if authors[i] == authors[j] else cosine.square()
-                    )
-        expected = torch.stack(same).mean() + torch.stack(different).mean()
-        actual = author_style_loss(tokens, authors, reference_mask=mask)
-        torch.testing.assert_close(actual, expected)
-        permutation = torch.tensor([2, 0, 1])
-        torch.testing.assert_close(
-            author_style_loss(tokens[:, permutation], authors, reference_mask=mask[:, permutation]), actual
-        )
-        actual.backward()
-        torch.testing.assert_close(tokens.grad[~mask], torch.zeros_like(tokens.grad[~mask]))
-        self.assertGreater(tokens.grad[mask].abs().sum().item(), 0)
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            reduced = author_style_loss(tokens.detach(), authors, reference_mask=mask)
-        self.assertEqual(reduced.dtype, torch.float32)
-        torch.testing.assert_close(reduced, expected.detach())
-
-    def test_author_loss_orthogonal_and_opposite_directions_and_missing_pairs(self):
-        basis = torch.tensor([[1., 0.], [1., 0.], [0., 1.]])[:, None, None, :].expand(-1, 2, 3, -1)
-        self.assertEqual(author_style_loss(basis, torch.tensor([0, 0, 1])).item(), 0.)
-        opposite = torch.tensor([[1., 0.], [-1., 0.]])[:, None, None, :]
-        self.assertEqual(author_style_loss(opposite, torch.tensor([0, 1])).item(), 1.)
-        single = torch.randn(1, 2, 3, 8, requires_grad=True)
-        zero = author_style_loss(single, torch.tensor([4]))
-        self.assertEqual(zero.item(), 0.)
-        zero.backward()
-        self.assertIsNotNone(single.grad)
-        self.assertTrue(torch.isfinite(author_style_loss(basis, torch.tensor([0, 0, 0]))))
-
     def test_flow_uses_only_pure_noise_initial_state(self):
         target, noise = torch.randn(2, 1, 16, 16), torch.randn(2, 1, 16, 16)
         times = torch.tensor([0., 1.])
@@ -165,28 +144,24 @@ class ArchitectureTests(unittest.TestCase):
         torch.testing.assert_close(flow.state[1], target[1])
         torch.testing.assert_close(flow.target_velocity, target - noise)
 
-    def test_training_loss_contains_both_terms_and_gradients_reach_both_encoders(self):
+    def test_training_loss_is_flow_mse_and_gradients_reach_both_encoders(self):
         torch.manual_seed(11)
         model = Glyph2Hand(tiny_config())
         torch.nn.init.normal_(model.generator.final.projection.weight, std=0.02)
-        model.author_style_loss_weight = 0.05
         batch = {
             "target_standard": torch.randn(3, 1, 16, 16),
             "target_handwriting": torch.randn(3, 1, 16, 16),
             "reference_handwriting": torch.randn(3, 2, 1, 16, 16),
             "reference_mask": torch.tensor([[1, 1], [1, 0], [1, 1]], dtype=torch.bool),
-            "author_index": torch.tensor([0, 0, 1]),
         }
         flow = build_flow_matching_batch(batch["target_handwriting"])
         style = model.encode_style(batch["reference_handwriting"], batch["reference_mask"])
         content = model.encode_content(batch["target_standard"])
         velocity = model.predict_velocity(flow.state, flow.times, content, style, batch["reference_mask"])
         mse = flow_matching_loss(velocity, flow.target_velocity)
-        author = author_style_loss(style.reshape(3, 2, 3, 32), batch["author_index"],
-                                   reference_mask=batch["reference_mask"])
         with patch("src.train.build_flow_matching_batch", return_value=flow):
             loss = batch_loss(model, batch)
-        torch.testing.assert_close(loss, mse + 0.05 * author)
+        torch.testing.assert_close(loss, mse)
         loss.backward()
         for module in (model.reference_encoder, model.content_encoder, model.generator):
             self.assertGreater(sum(p.grad.abs().sum().item() for p in module.parameters()

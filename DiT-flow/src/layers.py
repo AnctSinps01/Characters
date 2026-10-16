@@ -6,6 +6,9 @@ import torch
 from torch import Tensor, nn
 
 
+_LAYER_SCALE_INIT = 1e-4
+
+
 def _sincos_1d(positions: Tensor, width: int) -> Tensor:
     if width % 2:
         raise ValueError("1D sin/cos width must be even")
@@ -74,7 +77,7 @@ class Mlp(nn.Module):
 
 
 class SelfAttentionBlock(nn.Module):
-    """Pre-norm self-attention followed by a pre-norm token-wise MLP."""
+    """Pre-norm self-attention and MLP with static LayerScale residuals."""
 
     def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
         super().__init__()
@@ -82,18 +85,22 @@ class SelfAttentionBlock(nn.Module):
         self.attention = nn.MultiheadAttention(
             hidden_size, num_heads, dropout=0.0, batch_first=True
         )
+        self.attention_scale = nn.Parameter(
+            torch.full((hidden_size,), _LAYER_SCALE_INIT)
+        )
         self.mlp_norm = nn.LayerNorm(hidden_size)
         self.mlp = Mlp(hidden_size, mlp_ratio)
+        self.mlp_scale = nn.Parameter(torch.full((hidden_size,), _LAYER_SCALE_INIT))
 
     def forward(self, inputs: Tensor) -> Tensor:
         normalized = self.attention_norm(inputs)
         attended = self.attention(normalized, normalized, normalized, need_weights=False)[0]
-        outputs = inputs + attended
-        return outputs + self.mlp(self.mlp_norm(outputs))
+        outputs = inputs + self.attention_scale * attended
+        return outputs + self.mlp_scale * self.mlp(self.mlp_norm(outputs))
 
 
 class CrossAttentionBlock(nn.Module):
-    """Update query tokens by reading memory tokens; memory is never written back."""
+    """Update queries with static LayerScale attention and MLP residuals."""
 
     def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
         super().__init__()
@@ -102,8 +109,12 @@ class CrossAttentionBlock(nn.Module):
         self.attention = nn.MultiheadAttention(
             hidden_size, num_heads, dropout=0.0, batch_first=True
         )
+        self.attention_scale = nn.Parameter(
+            torch.full((hidden_size,), _LAYER_SCALE_INIT)
+        )
         self.mlp_norm = nn.LayerNorm(hidden_size)
         self.mlp = Mlp(hidden_size, mlp_ratio)
+        self.mlp_scale = nn.Parameter(torch.full((hidden_size,), _LAYER_SCALE_INIT))
 
     def forward(
         self,
@@ -121,8 +132,8 @@ class CrossAttentionBlock(nn.Module):
             key_padding_mask=memory_padding_mask,
             need_weights=False,
         )[0]
-        outputs = queries + attended
-        return outputs + self.mlp(self.mlp_norm(outputs))
+        outputs = queries + self.attention_scale * attended
+        return outputs + self.mlp_scale * self.mlp(self.mlp_norm(outputs))
 
 
 def modulate(inputs: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
@@ -181,6 +192,10 @@ class AdaLNZeroDiTBlock(nn.Module):
         self.style_attention = nn.MultiheadAttention(
             hidden_size, num_heads, dropout=0.0, batch_first=True
         )
+        self.content_scale = nn.Parameter(
+            torch.full((hidden_size,), _LAYER_SCALE_INIT)
+        )
+        self.style_scale = nn.Parameter(torch.full((hidden_size,), _LAYER_SCALE_INIT))
         self.mlp_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp = Mlp(hidden_size, mlp_ratio)
         self.modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 6 * hidden_size))
@@ -203,14 +218,14 @@ class AdaLNZeroDiTBlock(nn.Module):
             self.content_query_norm(outputs), normalized_content, normalized_content,
             need_weights=False,
         )[0]
-        outputs = outputs + content_outputs
+        outputs = outputs + self.content_scale * content_outputs
 
         normalized_style = self.style_memory_norm(style)
         style_outputs = self.style_attention(
             self.style_query_norm(outputs), normalized_style, normalized_style,
             key_padding_mask=style_padding_mask, need_weights=False,
         )[0]
-        outputs = outputs + style_outputs
+        outputs = outputs + self.style_scale * style_outputs
 
         mlp_inputs = modulate(self.mlp_norm(outputs), shift_mlp, scale_mlp)
         return outputs + gate_mlp.unsqueeze(1) * self.mlp(mlp_inputs)

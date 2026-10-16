@@ -311,7 +311,7 @@ class TrainingTests(unittest.TestCase):
             checkpoint = root / "old.pt"
             output = root / "new_run"
             args = argparse.Namespace(device="cpu", resume=checkpoint, output=output)
-            for version in (1, 2):
+            for version in (1, 2, 3, 4):
                 with self.subTest(version=version):
                     torch.save({"version": version}, checkpoint)
                     with self.assertRaisesRegex(ValueError, "old checkpoint architecture"):
@@ -372,7 +372,6 @@ class TrainingTests(unittest.TestCase):
                 local_depth=1, content_depth=1, generator_depth=1,
                 description_tokens=2, time_frequency_size=16,
             ))
-            model.author_style_loss_weight = 0.05
             config = TrainingConfig(batch_size=2, val_batches=1, sample_steps=2)
             dataset = HandwritingEpisodes(data, "val", length=2,
                                            min_references=1, max_references=2, seed=43)
@@ -433,7 +432,7 @@ class TrainingTests(unittest.TestCase):
             full = torch.load(root / "full/last.pt", weights_only=True)
             resumed = torch.load(root / "split/last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 3)
-            self.assertEqual(resumed["version"], 3)
+            self.assertEqual(resumed["version"], 5)
             self.assertNotIn("ema", resumed)
             self.assertNotIn("preload_to_gpu", resumed["settings"]["training"])
             for name in full["model"]:
