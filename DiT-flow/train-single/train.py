@@ -12,5 +12,7 @@ from src.train import main
 
 
 if __name__ == "__main__":
-    subset_size = run_path(str(Path(__file__).with_name("config.py")))["SUBSET_SIZE"]
-    main(single_writer=True, subset_size=subset_size)
+    local_config = run_path(str(Path(__file__).with_name("config.py")))
+    main(single_writer=True,
+         subset_size=local_config["SUBSET_SIZE"],
+         style_hidden_loss_enabled=local_config["ENABLE_STYLE_HIDDEN_LOSS"])
