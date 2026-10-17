@@ -11,8 +11,8 @@ class ModelConfig:
     image_size: int = 64
     patch_size: int = 8
     in_channels: int = 1
-    hidden_size: int = 256
-    num_heads: int = 8
+    hidden_size: int = 384
+    num_heads: int = 12
     mlp_ratio: float = 2.0                  # FNN hidden dim
     local_depth: int = 8                    # 单参考手写字 SA 层数
                                             # 当前设置只有固定一层 CA 风格浓缩。

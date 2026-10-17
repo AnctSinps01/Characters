@@ -68,7 +68,7 @@ e_raw(t) = concat(cos(t*time_scale*f_k), sin(t*time_scale*f_k))
 e(t) = Linear → SiLU → Linear(e_raw(t))
 ```
 
-二维位置编码按行、列各分配 `d/2` 维，分别使用 `sin → cos` 拼接、周期基数 `10000`。位置和时间频率是固定、非持久化 buffer，不是学习参数，也不写入 `state_dict`。`time_frequency_size` 默认是定义配置类时的 `256`；单独改 `hidden_size` 不会自动改它。
+二维位置编码按行、列各分配 `d/2` 维，分别使用 `sin → cos` 拼接、周期基数 `10000`。位置和时间频率是固定、非持久化 buffer，不是学习参数，也不写入 `state_dict`。`time_frequency_size` 默认是定义配置类时的 `384`；单独改 `hidden_size` 不会自动改它。
 
 每个主干块依次为 **`SA → Content CA → Style CA → FFN`**：
 
@@ -102,12 +102,12 @@ L_flow = mean((predicted_velocity-u)²)
 | `ModelConfig` 字段 | 默认值 | 含义 |
 |---|---:|---|
 | `image_size` / `patch_size` / `in_channels` | `64` / `8` / `1` | 灰度图与块；网格 `8×8`，`L=64` |
-| `hidden_size` / `num_heads` / `mlp_ratio` | `256` / `8` / `2.0` | 每头维度 `32`，FFN 内宽 `512` |
+| `hidden_size` / `num_heads` / `mlp_ratio` | `384` / `12` / `2.0` | 每头维度 `32`，FFN 内宽 `768` |
 | `local_depth` / `content_depth` / `generator_depth` | `8` / `8` / `8` | 单参考风格 / 内容 / 主干深度 |
 | `description_tokens` | `16` | 每个参考字的描述数 Z；默认 4 个参考产生 64 个风格 token |
-| `time_frequency_size` / `time_scale` | `256` / `1000.0` | 时间 Fourier 特征维度 / 放大倍数 |
+| `time_frequency_size` / `time_scale` | `384` / `1000.0` | 时间 Fourier 特征维度 / 放大倍数 |
 
-模型要求图像边长可被块边长整除，`hidden_size` 可被头数和 `4` 整除，时间特征维为正偶数；风格、内容和主干 SA 深度允许 `0`。默认可学习参数总数 **20,901,440**：参考编码器 **4,769,792**，内容编码器 **4,237,568**，主干 **11,894,080**；其中包含 LayerScale 参数。`count_parameters.py` 支持所有模型字段的 kebab-case 参数（如 `--hidden-size 128 --time-frequency-size 128 --content-depth 4`），仅用于统计，不改变训练配置。
+模型要求图像边长可被块边长整除，`hidden_size` 可被头数和 `4` 整除，时间特征维为正偶数；风格、内容和主干 SA 深度允许 `0`。默认可学习参数总数 **46,884,160**：参考编码器 **10,693,632**，内容编码器 **9,502,080**，主干 **26,688,448**；其中包含 LayerScale 参数。`count_parameters.py` 支持所有模型字段的 kebab-case 参数（如 `--hidden-size 128 --time-frequency-size 128 --content-depth 4`），仅用于统计，不改变训练配置。
 
 | `TrainingConfig` 字段 | 默认值 | 含义 |
 |---|---:|---|

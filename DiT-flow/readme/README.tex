@@ -214,16 +214,16 @@ x_0&=\epsilon,\qquad x_t=(1-t)\epsilon+tH_\star,\qquad u=H_\star-\epsilon,\\
 模型字段 & 默认值 & 含义 \\
 \midrule
 \code{image_size / patch_size / in_channels} & $64/8/1$ & $L=64$，单通道 \\
-\code{hidden_size / num_heads / mlp_ratio} & $256/8/2$ & 每头 $32$，FFN 内宽 $512$ \\
+\code{hidden_size / num_heads / mlp_ratio} & $384/12/2$ & 每头 $32$，FFN 内宽 $768$ \\
 \code{local_depth / content_depth} & $8/8$ & 风格、内容 SA 深度独立 \\
 \code{generator_depth} & $8$ & 双 CA 主干深度 \\
 \code{description_tokens} & $16$ & 每字 $Z$ 个描述 \\
-\code{time_frequency_size / time_scale} & $256/1000$ & 时间编码维度与倍数 \\
+\code{time_frequency_size / time_scale} & $384/1000$ & 时间编码维度与倍数 \\
 \bottomrule
 \end{tabularx}\end{center}
 图像边长须整除 patch 边长，$d$ 可被头数和 $4$ 整除，时间特征维为正偶数，三个 SA 深度允许为 $0$。
-时间特征维默认在类定义时确定为 $256$，单独改 $d$ 不会自动同步。
-默认参数总数 $20{,}901{,}440$：参考 $4{,}769{,}792$，内容 $4{,}237{,}568$，主干 $11{,}894{,}080$，其中包含初值为 $10^{-4}$ 的 LayerScale 参数。
+时间特征维默认在类定义时确定为 $384$，单独改 $d$ 不会自动同步。
+默认参数总数 $46{,}884{,}160$：参考 $10{,}693{,}632$，内容 $9{,}502{,}080$，主干 $26{,}688{,}448$，其中包含初值为 $10^{-4}$ 的 LayerScale 参数。
 
 \begin{center}\small
 \begin{tabularx}{\linewidth}{@{}l l X@{}}
