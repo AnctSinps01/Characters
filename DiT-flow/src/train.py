@@ -308,36 +308,135 @@ def comparable_settings(settings):
     return settings
 
 
+def _eligible_train_writers(manifest: dict, config: TrainingConfig) -> list[dict]:
+    return [writer for writer in manifest["writers"]
+            if writer["split"] == "train"
+            and len(writer["labels"]) > config.max_references
+            and len(set(writer["labels"])) == len(writer["labels"])]
+
+
+def _validate_half_selection(selection: dict, manifest: dict,
+                             config: TrainingConfig) -> dict:
+    """Validate the writer/character pool stored in a half-data checkpoint."""
+    if selection.get("mode") != "dataset_subset_fit":
+        raise ValueError("train-half requires a dataset-subset checkpoint to resume")
+    writer_ids = selection.get("writer_ids")
+    subsets = selection.get("writer_sample_indices")
+    if (not isinstance(writer_ids, list) or not writer_ids
+            or any(not isinstance(writer_id, str) for writer_id in writer_ids)
+            or len(set(writer_ids)) != len(writer_ids)
+            or not isinstance(subsets, dict)
+            or set(subsets) != set(writer_ids)):
+        raise ValueError("checkpoint has invalid dataset-subset writer selection")
+    by_id = {writer["id"]: writer for writer in _eligible_train_writers(manifest, config)}
+    if any(not isinstance(writer_id, str) or writer_id not in by_id for writer_id in writer_ids):
+        raise ValueError("checkpoint has invalid dataset-subset writer IDs")
+    validated_subsets = {}
+    for writer_id in writer_ids:
+        indices = subsets[writer_id]
+        labels = by_id[writer_id]["labels"]
+        if (not isinstance(indices, list) or len(indices) <= config.max_references
+                or len(set(indices)) != len(indices)
+                or any(type(index) is not int or not 0 <= index < len(labels)
+                       for index in indices)):
+            raise ValueError(f"checkpoint has invalid character subset for writer {writer_id}")
+        validated_subsets[writer_id] = indices
+    result = dict(selection)
+    result["writer_ids"] = list(writer_ids)
+    result["writer_sample_indices"] = validated_subsets
+    return result
+
+
+def _select_dataset_subset(manifest: dict, config: TrainingConfig,
+                           dataset_size: int) -> dict:
+    """Select nested multi-writer data using one scale derived from image count.
+
+    ``dataset_size`` is the requested full-training image count. The same
+    fraction scales the number of writers and each writer's character pool;
+    rounding and the minimum episode pool size can make the resulting count
+    differ slightly from the request.
+    """
+    eligible = sorted(_eligible_train_writers(manifest, config),
+                      key=lambda writer: (-len(writer["labels"]), writer["id"]))
+    if not eligible:
+        raise ValueError("no training writer has distinct target + max_references characters")
+    total_image_count = sum(len(writer["labels"]) for writer in eligible)
+    fraction = min(1.0, dataset_size / total_image_count)
+    writer_count = min(len(eligible), max(1, math.floor(len(eligible) * fraction + 0.5)))
+    selected = eligible[:writer_count]
+    min_pool = config.max_references + 1
+    subsets = {}
+    for writer in selected:
+        count = min(len(writer["labels"]),
+                    max(min_pool, math.floor(len(writer["labels"]) * fraction + 0.5)))
+        indices = list(range(len(writer["labels"])))
+        # Use a private deterministic RNG so selection does not perturb training
+        # noise, time sampling, or checkpoint RNG state. Prefix selection makes
+        # smaller DATASET_SIZE values nested within larger values.
+        random.Random(f"{config.seed}:dataset-subset:{writer['id']}").shuffle(indices)
+        subsets[writer["id"]] = sorted(indices[:count])
+    selected_image_count = sum(len(indices) for indices in subsets.values())
+    return {
+        "mode": "dataset_subset_fit",
+        "requested_size": dataset_size,
+        "total_image_count": total_image_count,
+        "fraction": fraction,
+        "writer_count": len(selected),
+        "selected_image_count": selected_image_count,
+        "writer_ids": [writer["id"] for writer in selected],
+        "writer_sample_indices": subsets,
+        "evaluation": "same_selected_writers_and_characters",
+    }
+
+
 def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
                 writer_id: str | None, checkpoint: dict | None,
-                subset_size: int | None = None) -> dict | None:
+                subset_size: int | None = None,
+                dataset_size: int | None = None) -> dict | None:
     """Choose fitting data once; a resume must keep the saved selection."""
+    if subset_size is not None and dataset_size is not None:
+        raise ValueError("single-author and dataset-subset selection are mutually exclusive")
     if subset_size is not None:
         if not single_writer:
             raise ValueError("subset_size is only supported for single-author fitting")
         if type(subset_size) is not int or subset_size < 1:
             raise ValueError("SUBSET_SIZE must be a positive integer")
+    if dataset_size is not None:
+        if single_writer:
+            raise ValueError("dataset_size is not supported for single-author fitting")
+        if type(dataset_size) is not int or dataset_size < 1:
+            raise ValueError("DATASET_SIZE must be a positive integer")
     saved = checkpoint.get("data_selection") if checkpoint is not None else None
     if checkpoint is not None:
-        if not single_writer:
+        if single_writer:
+            expected_mode = "single_writer_fit"
+        elif dataset_size is not None:
+            expected_mode = "dataset_subset_fit"
+        else:
             if saved is not None:
-                raise ValueError("single-author checkpoint requires the train-single entry point")
+                raise ValueError("subset checkpoint requires the matching train-single or train-half entry point")
             return None
-        if not isinstance(saved, dict) or saved.get("mode") != "single_writer_fit":
-            raise ValueError("train-single requires a single-author checkpoint to resume")
+        if not isinstance(saved, dict) or saved.get("mode") != expected_mode:
+            if single_writer:
+                raise ValueError("train-single requires a single-author checkpoint to resume")
+            raise ValueError("train-half requires a dataset-subset checkpoint to resume")
         saved = dict(saved)
+    elif not single_writer:
+        if dataset_size is None:
+            return None
+
+    if dataset_size is not None:
+        if checkpoint is not None:
+            return _validate_half_selection(saved, manifest, config)
+        return _select_dataset_subset(manifest, config, dataset_size)
+
+    eligible = _eligible_train_writers(manifest, config)
+    if checkpoint is not None:
         if writer_id is not None and writer_id != saved.get("writer_id"):
             raise ValueError("writer-id differs from the saved single-author selection")
         writer_id = saved.get("writer_id")
         if not isinstance(writer_id, str):
             raise ValueError("single-author checkpoint has no valid writer ID")
-    elif not single_writer:
-        return None
-
-    eligible = [writer for writer in manifest["writers"]
-                if writer["split"] == "train"
-                and len(writer["labels"]) > config.max_references
-                and len(set(writer["labels"])) == len(writer["labels"])]
     if writer_id is None:
         if not eligible:
             raise ValueError("no training writer has distinct target + max_references characters")
@@ -375,7 +474,8 @@ def select_data(manifest: dict, config: TrainingConfig, *, single_writer: bool,
     return selection
 
 
-def run(args, *, single_writer: bool = False, subset_size: int | None = None):
+def run(args, *, single_writer: bool = False, subset_size: int | None = None,
+        dataset_size: int | None = None):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
@@ -413,6 +513,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None):
         manifest, config, single_writer=single_writer,
         writer_id=getattr(args, "writer_id", None), checkpoint=checkpoint,
         subset_size=subset_size,
+        dataset_size=dataset_size,
     )
     completed = checkpoint["step"] if checkpoint else 0
     stop_step = min(config.steps, args.stop_after or config.steps)
@@ -454,11 +555,16 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None):
         "preload_to_gpu": config.preload_to_gpu,
         "data_selection": data_selection,
     }, indent=2), encoding="utf-8")
-    if data_selection is not None:
+    if data_selection is not None and data_selection["mode"] == "single_writer_fit":
         print(f"Single-author fitting: writer={data_selection['writer_id']}, "
               f"characters={data_selection.get('subset_size', data_selection['character_count'])}"
               f"/{data_selection['character_count']}; "
               "evaluation uses the same writer and training character pool.", flush=True)
+    elif data_selection is not None and data_selection["mode"] == "dataset_subset_fit":
+        print(f"Dataset-subset fitting: writers={data_selection['writer_count']} "
+              f"and images={data_selection['selected_image_count']} "
+              f"from {data_selection['total_image_count']} training images; "
+              "evaluation uses the same selected writers and character pools.", flush=True)
     torch.manual_seed(config.seed)
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -479,15 +585,36 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None):
     del checkpoint
     episodes_per_step = config.batch_size
     data_device = device if config.preload_to_gpu else torch.device("cpu")
-    selected_writer = data_selection["writer_id"] if data_selection is not None else None
+    selected_writer = (
+        data_selection["writer_id"]
+        if data_selection is not None and data_selection["mode"] == "single_writer_fit"
+        else None
+    )
+    selected_writer_ids = (
+        tuple(data_selection["writer_ids"])
+        if data_selection is not None and data_selection["mode"] == "dataset_subset_fit"
+        else None
+    )
+    selected_indices_by_id = (
+        data_selection["writer_sample_indices"]
+        if data_selection is not None and data_selection["mode"] == "dataset_subset_fit"
+        else None
+    )
     preloaded = PreloadedGlyphs(args.data, device=data_device, verbose=True,
-                               writer_ids=(selected_writer,) if selected_writer is not None else None)
+                               writer_ids=(
+                                   (selected_writer,)
+                                   if selected_writer is not None
+                                   else selected_writer_ids
+                               ))
     if preloaded.fingerprint != fingerprint:
         raise ValueError("prepared manifest changed during startup")
     common = dict(min_references=config.min_references, max_references=config.max_references,
                   preloaded=preloaded, writer_id=selected_writer,
+                  writer_ids=selected_writer_ids,
                   writer_sample_indices=(data_selection.get("subset_indices")
-                                         if data_selection is not None else None))
+                                         if data_selection is not None
+                                         and data_selection["mode"] == "single_writer_fit" else None),
+                  writer_sample_indices_by_id=selected_indices_by_id)
     training = HandwritingEpisodes(args.data, "train", length=config.steps * episodes_per_step,
                                    seed=config.seed, **common)
     validation = HandwritingEpisodes(args.data, "val", length=config.val_batches * config.batch_size,
@@ -580,8 +707,13 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None):
     print(f"Saved step {completed}: {args.output / 'last.pt'}", flush=True)
 
 
-def main(*, single_writer: bool = False, subset_size: int | None = None):
-    description = "Fit one automatically selected training writer." if single_writer else __doc__
+def main(*, single_writer: bool = False, subset_size: int | None = None,
+         dataset_size: int | None = None):
+    description = (
+        "Fit one automatically selected training writer." if single_writer
+        else "Fit a deterministic writer/character subset." if dataset_size is not None
+        else __doc__
+    )
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -594,7 +726,8 @@ def main(*, single_writer: bool = False, subset_size: int | None = None):
     args = parser.parse_args()
     if args.stop_after is not None and args.stop_after < 1:
         parser.error("--stop-after must be positive")
-    run(args, single_writer=single_writer, subset_size=subset_size)
+    run(args, single_writer=single_writer, subset_size=subset_size,
+        dataset_size=dataset_size)
 
 
 if __name__ == "__main__":

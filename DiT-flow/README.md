@@ -4,7 +4,7 @@
 
 架构图和公式见 [README.tex](readme/README.tex) / [README.pdf](readme/README.pdf)，服务器操作步骤见 [TRAINING.md](TRAINING.md)，源码索引见 [src/README.md](src/README.md)。`readme/README.v1-with-diagrams.*` 是历史设计，不代表当前实现。通用线条图变形路线见 [../twist/](../twist/README.md)。
 
-先检查模型拟合能力可用 [单作者训练入口](train-single/code.md)：运行时选择字符最多的训练作者，由 `train-single/config.py` 的 `SUBSET_SIZE` 限制固定字符子集，训练与生成评估使用同一子集，复用本训练器和续训逻辑；命令可从 `Characters/` 直接运行。
+先检查模型拟合能力可用 [单作者训练入口](train-single/code.md)：运行时选择字符最多的训练作者，由 `train-single/config.py` 的 `SUBSET_SIZE` 限制固定字符子集，训练与生成评估使用同一子集，复用本训练器和续训逻辑。需要测试多作者缩小数据规模时使用 [train-half 入口](train-half/code.md)：`DATASET_SIZE` 按完整训练图像数计算比例，同时缩减作者数量和每位作者的字符池；命令可从 `Characters/` 直接运行。
 
 ## 运行位置与入口
 

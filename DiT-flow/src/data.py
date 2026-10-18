@@ -190,7 +190,9 @@ class HandwritingEpisodes(Dataset):
                  min_references: int, max_references: int, seed: int,
                  preloaded: PreloadedGlyphs | None = None,
                  writer_id: str | None = None,
-                 writer_sample_indices: list[int] | None = None):
+                 writer_ids: tuple[str, ...] | None = None,
+                 writer_sample_indices: list[int] | None = None,
+                 writer_sample_indices_by_id: dict[str, list[int]] | None = None):
         self.root = Path(root)
         self._preloaded = preloaded if preloaded is not None else PreloadedGlyphs(self.root)
         if self._preloaded.root != self.root.resolve():
@@ -201,12 +203,27 @@ class HandwritingEpisodes(Dataset):
             raise ValueError("expected 1 <= min_references <= max_references")
         if length < 1:
             raise ValueError("episode count must be positive")
-        if writer_id is None:
+        if writer_id is not None and writer_ids is not None:
+            raise ValueError("writer_id and writer_ids are mutually exclusive")
+        if writer_sample_indices is not None and writer_sample_indices_by_id is not None:
+            raise ValueError("writer_sample_indices and writer_sample_indices_by_id are mutually exclusive")
+        if writer_id is None and writer_ids is None:
             self.writers = [w for w in self.manifest["writers"] if w["split"] == split]
-        else:
+        elif writer_id is not None:
             # Fitting diagnostics deliberately evaluate the same writer and
             # character pool as training, with independently seeded episodes.
             self.writers = [w for w in self.manifest["writers"] if w["id"] == writer_id]
+        else:
+            requested = tuple(writer_ids)
+            if not requested or len(set(requested)) != len(requested):
+                raise ValueError("writer_ids must be a non-empty sequence of distinct IDs")
+            by_id = {writer["id"]: writer for writer in self.manifest["writers"]}
+            unknown = [writer_id for writer_id in requested if writer_id not in by_id]
+            if unknown:
+                raise ValueError(f"writer_ids contains unknown IDs: {unknown}")
+            # A selected train pool is intentionally reused for validation, just
+            # like the existing single-author fitting mode.
+            self.writers = [by_id[writer_id] for writer_id in requested]
         if not self.writers:
             raise ValueError(f"no writers for split={split}, writer_id={writer_id}")
         for writer in self.writers:
@@ -216,6 +233,7 @@ class HandwritingEpisodes(Dataset):
             if len(set(labels)) != len(labels) or len(labels) <= max_references:
                 raise ValueError(f"writer {writer['id']} needs distinct target + references")
         self.writer_sample_indices = None
+        self.writer_sample_indices_by_id = None
         if writer_sample_indices is not None:
             if writer_id is None:
                 raise ValueError("writer_sample_indices requires a single writer_id")
@@ -225,6 +243,21 @@ class HandwritingEpisodes(Dataset):
                            for index in indices)):
                 raise ValueError("writer subset needs distinct, valid target + reference indices")
             self.writer_sample_indices = indices
+        elif writer_sample_indices_by_id is not None:
+            if writer_id is not None:
+                raise ValueError("writer_sample_indices_by_id requires writer_ids")
+            selected = {}
+            for writer in self.writers:
+                if writer["id"] not in writer_sample_indices_by_id:
+                    raise ValueError(f"missing character subset for writer {writer['id']}")
+                indices = tuple(writer_sample_indices_by_id[writer["id"]])
+                if (len(indices) <= max_references or len(set(indices)) != len(indices)
+                        or any(type(index) is not int or not 0 <= index < len(writer["labels"])
+                               for index in indices)):
+                    raise ValueError(f"writer subset needs distinct, valid target + reference indices: "
+                                     f"{writer['id']}")
+                selected[writer["id"]] = indices
+            self.writer_sample_indices_by_id = selected
         self.length = length
         self.min_references = min_references
         self.max_references = max_references
@@ -245,8 +278,12 @@ class HandwritingEpisodes(Dataset):
             raise RuntimeError("dataset is closed")
         images = self._preloaded.writer_images(writer["id"])
         count = rng.randint(self.min_references, self.max_references)
-        pool = (self.writer_sample_indices if self.writer_sample_indices is not None
-                else range(len(writer["labels"])))
+        if self.writer_sample_indices is not None:
+            pool = self.writer_sample_indices
+        elif self.writer_sample_indices_by_id is not None:
+            pool = self.writer_sample_indices_by_id[writer["id"]]
+        else:
+            pool = range(len(writer["labels"]))
         selected = rng.sample(pool, count + 1)
         labels = writer["labels"]
 
