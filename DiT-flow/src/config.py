@@ -14,11 +14,11 @@ class ModelConfig:
     hidden_size: int = 384
     num_heads: int = 12
     mlp_ratio: float = 2.0                  # FNN hidden dim
-    local_depth: int = 8                    # 单参考手写字 SA 层数
+    local_depth: int = 10                   # 单参考手写字 SA 层数
                                             # 当前设置只有固定一层 CA 风格浓缩。
-    content_depth: int = 8                  # 目标标准字 SA 层数，独立调整
-    generator_depth: int = 8                # 主干层数
-    description_tokens: int = 16            # 单字描述 token 数
+    content_depth: int = 10                 # 目标标准字 SA 层数，独立调整
+    generator_depth: int = 12               # 主干层数
+    description_tokens: int = 24            # 单字描述 token 数
     time_frequency_size: int = hidden_size  # Time embed origin dim
     time_scale: float = 1_000.0             # 在生成正弦/余弦特征前，把 t∈[0,1] 放大
 
