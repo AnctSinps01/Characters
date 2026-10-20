@@ -290,20 +290,23 @@ class HandwritingEpisodes(Dataset):
         # Gather the whole episode at once instead of converting each glyph in
         # a Python loop. Advanced indexing creates only the small episode copy.
         hands = images[selected]
-        standard = self._preloaded.standards[labels[selected[0]]]
+        standards = self._preloaded.standards[[labels[index] for index in selected]]
         if isinstance(hands, np.ndarray):
             hands = torch.from_numpy(hands)
-            standard = torch.from_numpy(standard.copy())
+            standards = torch.from_numpy(standards)
         hands = hands.float().unsqueeze(1) / 127.5 - 1
-        standard = standard.float().unsqueeze(0) / 127.5 - 1
+        standards = standards.float().unsqueeze(1) / 127.5 - 1
 
         size = self.manifest["image_size"]
         ref_hand = hands.new_ones(self.max_references, 1, size, size)
         ref_hand[:count] = hands[1:]
+        ref_standard = standards.new_ones(self.max_references, 1, size, size)
+        ref_standard[:count] = standards[1:]
         mask = torch.arange(self.max_references, device=hands.device) < count
         return {
-            "target_standard": standard,
+            "target_standard": standards[0],
             "target_handwriting": hands[0],
             "reference_handwriting": ref_hand,
+            "reference_standard": ref_standard,
             "reference_mask": mask,
         }

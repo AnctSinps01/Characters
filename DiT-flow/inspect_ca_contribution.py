@@ -256,7 +256,9 @@ def inspect_checkpoint(
             for raw in loader:
                 batch = move_batch(raw, device)
                 flow = build_flow_matching_batch(batch["target_handwriting"])
-                style = model.encode_style(batch["reference_handwriting"], batch["reference_mask"])
+                style = model.encode_style(
+                    batch["reference_handwriting"], batch["reference_standard"], batch["reference_mask"]
+                )
                 content = model.encode_content(batch["target_standard"])
                 model.predict_velocity(
                     flow.state,

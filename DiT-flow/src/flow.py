@@ -57,6 +57,7 @@ def sample_euler(
     model: Glyph2Hand,
     target_standard: Tensor,
     reference_handwriting: Tensor,
+    reference_standard: Tensor,
     *,
     steps: int,
     noise: Tensor | None = None,
@@ -72,7 +73,7 @@ def sample_euler(
         raise ValueError("noise must match target_standard")
 
     content = model.encode_content(target_standard)
-    style = model.encode_style(reference_handwriting, reference_mask)
+    style = model.encode_style(reference_handwriting, reference_standard, reference_mask)
     state = noise
     step_size = 1.0 / steps
     batch = target_standard.shape[0]

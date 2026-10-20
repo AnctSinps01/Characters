@@ -4,6 +4,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 
 _LAYER_SCALE_INIT = 1e-4
@@ -97,6 +98,65 @@ class SelfAttentionBlock(nn.Module):
         attended = self.attention(normalized, normalized, normalized, need_weights=False)[0]
         outputs = inputs + self.attention_scale * attended
         return outputs + self.mlp_scale * self.mlp(self.mlp_norm(outputs))
+
+
+class _JointAttentionStream(nn.Module):
+    """One stream's independent projections and LayerScale residual updates."""
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.attention_norm = nn.LayerNorm(hidden_size)
+        self.qkv = nn.Linear(hidden_size, 3 * hidden_size)
+        self.projection = nn.Linear(hidden_size, hidden_size)
+        self.attention_scale = nn.Parameter(
+            torch.full((hidden_size,), _LAYER_SCALE_INIT)
+        )
+        self.mlp_norm = nn.LayerNorm(hidden_size)
+        self.mlp = Mlp(hidden_size, mlp_ratio)
+        self.mlp_scale = nn.Parameter(torch.full((hidden_size,), _LAYER_SCALE_INIT))
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.zeros_(self.qkv.bias)
+
+    def project(self, tokens: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        batch, count, width = tokens.shape
+        qkv = self.qkv(self.attention_norm(tokens)).reshape(
+            batch, count, 3, self.num_heads, width // self.num_heads
+        ).permute(2, 0, 3, 1, 4)
+        return qkv.unbind(0)
+
+    def update(self, tokens: Tensor, attended: Tensor) -> Tensor:
+        outputs = tokens + self.attention_scale * self.projection(attended)
+        return outputs + self.mlp_scale * self.mlp(self.mlp_norm(outputs))
+
+
+class JointAttentionBlock(nn.Module):
+    """Two independent streams attending jointly to both reference images."""
+
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float) -> None:
+        super().__init__()
+        self.handwriting = _JointAttentionStream(hidden_size, num_heads, mlp_ratio)
+        self.standard = _JointAttentionStream(hidden_size, num_heads, mlp_ratio)
+
+    def forward(self, handwriting: Tensor, standard: Tensor) -> tuple[Tensor, Tensor]:
+        if handwriting.ndim != 3 or standard.shape != handwriting.shape:
+            raise ValueError("joint reference streams must have matching [B, L, D] shapes")
+        hand_q, hand_k, hand_v = self.handwriting.project(handwriting)
+        standard_q, standard_k, standard_v = self.standard.project(standard)
+        # Sequence concatenation gives every query access to BOTH images.
+        queries = torch.cat((hand_q, standard_q), dim=2)
+        keys = torch.cat((hand_k, standard_k), dim=2)
+        values = torch.cat((hand_v, standard_v), dim=2)
+        attended = F.scaled_dot_product_attention(
+            queries, keys, values, dropout_p=0.0
+        )
+        batch, _, count, _ = attended.shape
+        attended = attended.transpose(1, 2).reshape(batch, count, handwriting.shape[-1])
+        hand_attended, standard_attended = attended.chunk(2, dim=1)
+        return (
+            self.handwriting.update(handwriting, hand_attended),
+            self.standard.update(standard, standard_attended),
+        )
 
 
 class CrossAttentionBlock(nn.Module):

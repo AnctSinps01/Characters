@@ -21,9 +21,10 @@ class Glyph2Hand(nn.Module):
     def encode_style(
         self,
         reference_handwriting: Tensor,
+        reference_standard: Tensor,
         reference_mask: Tensor | None = None,
     ) -> Tensor:
-        return self.reference_encoder(reference_handwriting, reference_mask)
+        return self.reference_encoder(reference_handwriting, reference_standard, reference_mask)
 
     def encode_content(self, target_standard: Tensor) -> Tensor:
         return self.content_encoder(target_standard)
@@ -51,8 +52,9 @@ class Glyph2Hand(nn.Module):
         times: Tensor,
         target_standard: Tensor,
         reference_handwriting: Tensor,
+        reference_standard: Tensor,
         reference_mask: Tensor | None = None,
     ) -> Tensor:
-        style = self.encode_style(reference_handwriting, reference_mask)
+        style = self.encode_style(reference_handwriting, reference_standard, reference_mask)
         content = self.encode_content(target_standard)
         return self.predict_velocity(state, times, content, style, reference_mask)

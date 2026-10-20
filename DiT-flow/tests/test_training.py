@@ -98,6 +98,11 @@ class DataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "data"
             fixture_data(root)
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for writer in manifest["writers"]:
+                writer["labels"] = [4, 0, 5, 2, 1, 3]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             dataset = HandwritingEpisodes(root, "train", length=24, min_references=1,
                                           max_references=5, seed=5)
             standards = np.load(root / "standards.npy")
@@ -113,12 +118,14 @@ class DataTests(unittest.TestCase):
                     "target_standard": convert(standards[writer["labels"][selected[0]]]),
                     "target_handwriting": convert(images[selected[0]]),
                     "reference_handwriting": torch.ones(5, 1, 16, 16),
+                    "reference_standard": torch.ones(5, 1, 16, 16),
                     "reference_mask": torch.arange(5) < count,
                 }
                 for slot, sample in enumerate(selected[1:]):
                     expected["reference_handwriting"][slot] = convert(images[sample])
+                    expected["reference_standard"][slot] = convert(standards[writer["labels"][sample]])
                 actual = dataset[index]
-                self.assertNotIn("reference_standard", actual)
+                self.assertEqual(set(actual), set(expected))
                 for key in expected:
                     torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
             dataset.close()
@@ -187,6 +194,7 @@ class DataTests(unittest.TestCase):
                 self.assertFalse((references == target).any())
                 self.assertEqual(len(references.unique()), len(references))
                 self.assertTrue((item["reference_handwriting"][~valid] == 1).all())
+                self.assertTrue((item["reference_standard"][~valid] == 1).all())
                 torch.testing.assert_close(item["target_standard"], dataset[index]["target_standard"])
             for direct, worker in zip(DataLoader(dataset, batch_size=3, num_workers=0),
                                       DataLoader(dataset, batch_size=3, num_workers=2)):
@@ -311,7 +319,7 @@ class TrainingTests(unittest.TestCase):
             checkpoint = root / "old.pt"
             output = root / "new_run"
             args = argparse.Namespace(device="cpu", resume=checkpoint, output=output)
-            for version in (1, 2, 3, 4):
+            for version in (1, 2, 3, 4, 5):
                 with self.subTest(version=version):
                     torch.save({"version": version}, checkpoint)
                     with self.assertRaisesRegex(ValueError, "old checkpoint architecture"):
@@ -432,7 +440,7 @@ class TrainingTests(unittest.TestCase):
             full = torch.load(root / "full/last.pt", weights_only=True)
             resumed = torch.load(root / "split/last.pt", weights_only=True)
             self.assertEqual(resumed["step"], 3)
-            self.assertEqual(resumed["version"], 5)
+            self.assertEqual(resumed["version"], 6)
             self.assertNotIn("ema", resumed)
             self.assertNotIn("preload_to_gpu", resumed["settings"]["training"])
             for name in full["model"]:

@@ -7,7 +7,7 @@ from .layers import PatchEmbed2D, SelfAttentionBlock
 
 
 class ContentEncoder(nn.Module):
-    """The reference encoder's patch/SA path, without the final CA compression."""
+    """Independent target-standard patch/SA path; keep every spatial token."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()

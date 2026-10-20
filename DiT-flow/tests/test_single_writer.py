@@ -322,5 +322,43 @@ class SingleWriterTests(unittest.TestCase):
             self.assertTrue((root / "split/previews/step_0000003.png").is_file())
 
 
+    def test_half_data_paired_training_and_resume_match_uninterrupted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            fixture_data(data)
+            model, config = tiny_settings()
+            args = argparse.Namespace(data=data, output=root / "full", resume=None,
+                                      device="cpu", workers=0, stop_after=None, writer_id=None)
+            with redirect_stdout(io.StringIO()):
+                with patch("src.train.ModelConfig", return_value=model), \
+                     patch("src.train.TrainingConfig", return_value=config):
+                    run(args, dataset_size=11)
+                    args.output, args.stop_after = root / "split", 1
+                    run(args, dataset_size=11)
+                args.resume, args.stop_after = args.output / "last.pt", None
+                # A local size change must not replace the saved fitting pool.
+                run(args, dataset_size=1)
+            full = torch.load(root / "full/last.pt", weights_only=True)
+            resumed = torch.load(root / "split/last.pt", weights_only=True)
+            selection = resumed["data_selection"]
+            self.assertEqual(resumed["version"], 6)
+            self.assertEqual(selection, full["data_selection"])
+            self.assertEqual(selection["mode"], "dataset_subset_fit")
+            self.assertEqual(selection["requested_size"], 11)
+            self.assertEqual(selection["writer_ids"], ["rich", "small"])
+            self.assertEqual(selection["selected_image_count"], 11)
+            for name in full["model"]:
+                torch.testing.assert_close(full["model"][name], resumed["model"][name],
+                                           rtol=0, atol=0)
+            torch.testing.assert_close(full["cpu_rng"], resumed["cpu_rng"], rtol=0, atol=0)
+            for key, state in full["optimizer"]["state"].items():
+                for name, value in state.items():
+                    torch.testing.assert_close(value, resumed["optimizer"]["state"][key][name],
+                                               rtol=0, atol=0)
+            self.assertTrue((root / "split/previews/step_0000003.png").is_file())
+            self.assertTrue((root / "split/best.pt").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

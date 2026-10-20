@@ -99,7 +99,9 @@ def metrics_json(metrics: dict) -> str:
 
 def batch_loss(model, batch):
     flow = build_flow_matching_batch(batch["target_handwriting"])
-    style = model.encode_style(batch["reference_handwriting"], batch["reference_mask"])
+    style = model.encode_style(
+        batch["reference_handwriting"], batch["reference_standard"], batch["reference_mask"]
+    )
     content = model.encode_content(batch["target_standard"])
     prediction = model.predict_velocity(
         flow.state, flow.times, content, style, batch["reference_mask"]
@@ -196,6 +198,7 @@ def evaluate(model, loader, device, precision, config, preview_path):
             with autocast_context(device, precision):
                 generated = sample_euler(
                     model, preview["target_standard"], preview["reference_handwriting"],
+                    preview["reference_standard"],
                     steps=config.sample_steps, reference_mask=preview["reference_mask"]
                 )
             if not torch.isfinite(generated).all():
@@ -479,12 +482,12 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
-    if checkpoint is not None and checkpoint.get("version") in (1, 2, 3, 4):
+    if checkpoint is not None and checkpoint.get("version") in (1, 2, 3, 4, 5):
         raise ValueError(
             "old checkpoint architecture or settings are incompatible with this trainer; "
             "start a new run without --resume in a new output directory"
         )
-    if checkpoint is not None and checkpoint.get("version") != 5:
+    if checkpoint is not None and checkpoint.get("version") != 6:
         raise ValueError("unsupported checkpoint version")
     if checkpoint is not None:
         settings = checkpoint["settings"]
@@ -640,7 +643,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
 
     def save(name):
         atomic_save({
-            "version": 5, "settings": settings, "data_fingerprint": fingerprint,
+            "version": 6, "settings": settings, "data_fingerprint": fingerprint,
             "data_selection": data_selection,
             "step": completed, "best_val_loss": best,
             "model": model.state_dict(),

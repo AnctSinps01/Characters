@@ -3,13 +3,13 @@
 ## 训练
 
 ```bash
-python DiT-flow/train-half/train.py --data data/prepared --output runs/DiT-half --device cuda --workers 0
+python DiT-flow/train-half/train.py --data data/prepared --output runs/DiT-v2-half --device cuda --workers 0
 ```
 
 ## 续训
 
 ```bash
-python DiT-flow/train-half/train.py --data data/prepared --output runs/DiT-half --resume runs/DiT-half/last.pt --device cuda --workers 0
+python DiT-flow/train-half/train.py --data data/prepared --output runs/DiT-v2-half --resume runs/DiT-half/last.pt --device cuda --workers 0
 ```
 
 `DATASET_SIZE` 只影响新实验。续训会从 checkpoint 恢复已保存的作者和字符选择；如果要用新的规模，请使用新的输出目录。

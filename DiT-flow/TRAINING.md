@@ -30,7 +30,7 @@ python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0
 
 ## 4. 先训练 100 步
 
-模型和训练参数直接改 `src/config.py`。当前默认每样本 4 个参考，调整 `min_references`/`max_references` 后在范围内均匀整数抽样。图像尺寸和参考上限请在处理数据前确定。每 batch 更新一次；风格只读手写字，目标标准字经独立内容编码器提取 token，主干从纯高斯噪声生成。训练和验证目标均为 flow MSE，完整公式见 [README](README.md)。
+模型和训练参数直接改 `src/config.py`。当前默认每样本 4 个参考，调整 `min_references`/`max_references` 后在范围内均匀整数抽样。图像尺寸和参考上限请在处理数据前确定。每 batch 更新一次；风格读取逐一配对的参考手写和标准字形，两侧独立投影后直接做多层联合注意力，输出相减、补位置，再经一层 CA 浓缩。目标标准字经独立内容编码器保留空间 token，主干从纯高斯噪声生成。训练和验证目标均为 flow MSE，完整公式见 [README](README.md)。
 
 训练启动时自动把 `../data/prepared/` 的全部字图加载到共享内存，打印实际占用 GiB；多个 worker 共用一份。要把字图改为常驻显存，将 `src/config.py` 中的 `preload_to_gpu` 改成 `True`；此时自动使用 `workers=0`。这个开关对旧检查点续训也生效。训练器兼容 PyTorch 2.3 的 `torch.cuda.amp.GradScaler` 和新版本的 `torch.amp.GradScaler`，更新训练代码后无需重新 prepare。
 
@@ -53,7 +53,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --de
 
 续训使用检查点保存的配置；修改 `src/config.py` 中的模型和训练超参数只影响新训练。运行方式开关 `preload_to_gpu` 例外，始终读取当前配置；`--device`、`--workers` 和 `--stop-after` 也可以在续训时指定。`--stop-after` 是绝对优化器步数，不改变保存的总步数或学习率日程。
 
-当前架构为纯噪声 flow、独立内容编码、未浓缩的多参考风格序列和双 CA 主干，检查点版本为 5。版本 1/2/3/4 权重或训练设置不兼容，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有的灰度预处理数据只要尺寸与字符数量满足配置即可复用，目标标准字作为内容条件，参考字不再配标准字。
+当前架构为纯噪声 flow、配对参考双路联合注意力、独立目标内容编码和双 CA 主干，检查点版本为 6。版本 1/2/3/4/5 权重或训练设置不兼容，不能直接续训；请去掉 `--resume` 并使用新的输出目录重新训练。已有灰度预处理数据只要尺寸与字符数量满足配置即可复用；参考标准字直接按字符标签从原有 `standards.npy` 提取，无需重新 prepare。
 
 ```bash
 python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --resume ../runs/DiT-flow/first/last.pt --device cuda
@@ -61,7 +61,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --re
 
 在训练循环中按 `Ctrl+C` 后，会完成当前优化器步、跳过该步验证并保存 `last.pt`，等保存完成再退出。强杀进程或一般运行异常只保留此前成功保存的检查点。训练结果都在仓库根目录的 `runs/DiT-flow/first/`，退租前复制回来。
 
-调整目录路径不改变数据格式，已有 `data/prepared/` 可复用。只有当前版本 3 的检查点支持 `--resume`；旧运行结果请保留，使用新的输出目录训练当前架构。
+调整目录路径不改变数据格式，已有 `data/prepared/` 可复用。只有当前版本 6 的检查点支持 `--resume`；旧运行结果请保留，使用新的输出目录训练当前架构。
 
 ## 6. 排查梯度异常
 
@@ -73,7 +73,7 @@ python -m src.train --data ../data/prepared --output ../runs/DiT-flow/first --re
 
 先查看异常前后 `top_parameters` 和 `top_modules` 的变化，确定问题集中在风格分支、内容分支、时间调制、注意力还是输出层，再针对该处检查激活和归一化输入方差。风格描述和内容 token 在被主干 CA 读取时已有 LayerNorm，仅重复添加归一化不能证明能够修复爆炸。
 
-这些诊断逻辑保留在当前架构中。版本 3 的检查点可续训，版本 1/2 不兼容；无需仅因启用诊断而重新准备数据。
+这些诊断逻辑保留在当前架构中。当前版本 6 的检查点可续训，版本 1..5 不兼容；无需仅因启用诊断而重新准备数据。
 
 ## 7. 检查点写入失败
 
