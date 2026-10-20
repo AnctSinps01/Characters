@@ -21,6 +21,29 @@ python -m unittest discover -s tests -v
 
 依赖为 PyTorch、NumPy、Pillow 和 fontTools，版本范围见 `../requirements.txt`；其中 SciPy 供 twist 使用。本训练器仅支持 CPU 或单张 CUDA GPU，没有分布式训练入口。服务器使用 CUDA 版 PyTorch；默认 BF16 要求 GPU 支持 BF16。CPU 自动使用 FP32。
 
+## 四个参考字的交互演示
+
+在 **Characters 仓库根目录**运行：
+
+```bash
+python DiT-flow/play.py
+```
+
+脚本自动打开本地浏览器页面；默认地址为 `http://127.0.0.1:8766`。在四块画板中各手写一个参考字，输入一个目标汉字，再点击「生成手写字」。画板支持笔刷粗细、橡皮、各格撤销和清空；生成结果可下载为 PNG。采样步数和随机种子可在「采样设置」中调整，默认读取所选实验 `run.json` 的 `settings.training`。
+
+模型列表扫描根目录 `runs/` 的直接子目录：目录中存在 **`best.pt` 或 `last.pt` 至少一个**，且具有有效的 DiT-flow `run.json`，即可选择。页面分别提供实验和权重选择；默认优先选择 `DiT-half`、`best.pt`，只有 `last.pt` 时也可使用。加入实验或权重后可点击「刷新列表」。模型架构取自所选实验 **`run.json["settings"]["model"]`**，完整训练 checkpoint、瘦身后保留 `model` 的 checkpoint 和纯 `state_dict` 均支持；仅在首次生成或切换权重时加载，之后复用模型。
+
+演示不需要预处理数据集。四张手写图复用训练的 `normalize_image`，自动裁剪、等比例缩放并居中；目标标准字复用 `render_character`，然后调用现有 `sample_euler` 从高斯噪声生成。默认字体为仓库的 `fonts/WenJinMinchoP0-Regular.ttf`，留白 `margin=4`。若训练数据使用其他字体、字体索引或留白，启动时用 `--font`、`--font-index`、`--margin` 指定相同设置，以保持内容条件一致。目标字限于训练预处理相同的基本汉字范围，并检查字体是否包含该字。
+
+自动选择 CUDA / CPU；CUDA 支持 BF16 时默认使用 BF16，其余使用 FP32。可手动指定设备、精度、端口或禁止自动打开浏览器，例如：
+
+```bash
+python DiT-flow/play.py --device cpu --port 8766 --no-open
+python DiT-flow/play.py --device cuda --precision fp32
+```
+
+也可用 `--runs-dir` 指定其他实验根目录。推理、画板及模型均在本机处理，不改动训练模式、配置或权重文件。
+
 ## 模型接口与张量约定
 
 设批量为 `B`、参考槽数为 `N`、图像边长为 `n`、块边长为 `p`、特征维为 `d`、每字描述数为 `Z=description_tokens`。空间 token 数 `L=(n/p)²`，风格序列长度为 `N·Z`。PyTorch 使用通道在前的布局：
