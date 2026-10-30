@@ -11,13 +11,13 @@ class ModelConfig:
     image_size: int = 64
     patch_size: int = 8
     in_channels: int = 1
-    hidden_size: int = 256
-    num_heads: int = 8
+    hidden_size: int = 384
+    num_heads: int = 12
     mlp_ratio: float = 2.0                  # FNN hidden dim
-    local_depth: int = 10                   # 每对参考手写/标准字的双路联合注意力层数
+    local_depth: int = 12                   # 每对参考手写/标准字的双路联合注意力层数
                                             # 联合输出相减、补位置编码后，固定一层 CA 浓缩。
-    content_depth: int = 10                 # 目标标准字 SA 层数，独立调整
-    generator_depth: int = 10               # 主干层数
+    content_depth: int = 12                 # 目标标准字 SA 层数，独立调整
+    generator_depth: int = 12               # 主干层数
     description_tokens: int = 24            # 单字描述 token 数
     time_frequency_size: int = hidden_size  # Time embed origin dim
     time_scale: float = 1_000.0             # 在生成正弦/余弦特征前，把 t∈[0,1] 放大
@@ -75,7 +75,7 @@ class TrainingConfig:
     workers: int = 4
     val_batches: int = 16
     validate_every: int = 1_000
-    save_every: int = 500
+    save_every: int = 2500
     log_every: int = 50
     sample_steps: int = 32                # t 从 0 到 1 采样次数
     seed: int = 42
