@@ -26,7 +26,7 @@ from PIL import Image, ImageFont
 import torch
 
 from src import Glyph2Hand, ModelConfig, sample_euler
-from src.data import normalize_image, render_character
+from glyphprep import normalize_image, render_character
 
 
 CANVAS_SIZE = 256

@@ -8,8 +8,8 @@
 - `generator.py`：当前状态独立 patch 投影并加二维位置，堆叠 `SA → Content CA → Style CA → FFN`。SA/FFN 使用 AdaLN-Zero，两类 CA 使用独立普通 LN 和初值 `1e-4` 的静态 LayerScale；Style CA 屏蔽补齐描述。
 - `model.py`：`forward(state, times, target_standard, reference_handwriting, reference_standard, reference_mask=None)`。可分别调用 `encode_content(target_standard)` 与 `encode_style(reference_handwriting, reference_standard, reference_mask=None)`，再调用 `predict_velocity(state, times, content, style, reference_mask=None)`。
 - `flow.py`：纯高斯噪声到手写真值的 flow MSE，以及只编码一次内容/风格的 Euler 采样；`sample_euler` 同样要求传入配对的 `reference_standard`。
-- `data.py`：GNT 读取、字图预处理、uint8 字图共享预加载和按作者采样的 episode。目标和参考标准字均按全局字符标签从原有标准字库提取；参考手写/标准一起补白并使用同一有效位掩码。数据准备格式保持版本 `1`。
-- `prepare_data.py`：数据准备入口，在 `DiT-flow/` 内运行 `python -m src.prepare_data`。
+- `data.py`：已准备数据集的 uint8 字图共享预加载和按作者采样的 episode。目标和参考标准字均按全局字符标签从原有标准字库提取；参考手写/标准一起补白并使用同一有效位掩码。数据准备格式保持版本 `1`。
+- `../../glyphprep/`：GNT 读取、字图预处理和数据准备入口（`python -m glyphprep.prepare`），由 DiT-flow 和 twist 共用，位于仓库根目录。
 - `train.py`：共享训练入口，在 `DiT-flow/` 内运行 `python -m src.train`；全量、单作者、缩小数据集训练共用配对参考、训练、验证预览和续训路径。
 - `../train-single/train.py`：单作者拟合入口，自动选字符最多的训练作者，由 `train-single/config.py` 限制固定字符子集。
 - `../train-half/train.py`：按其目录 `config.py` 的 `DATASET_SIZE` 缩减作者和各作者字符池，用于缩小规模拟合。两种拟合模式均在所选训练池中评估，选择记录于检查点，续训恢复保存的选择。

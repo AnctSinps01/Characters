@@ -1,4 +1,15 @@
-"""Prepare extracted CASIA HWDB training GNTs; never include official test GNTs."""
+"""Build the prepared dataset shared by DiT-flow and twist.
+
+    python -m glyphprep.prepare --gnt-root data/gnt \
+        --font fonts/WenJinMinchoP0-Regular.ttf --output data/prepared
+
+Reads the extracted CASIA-HWDB 1.1 training GNTs, keeps one sample per
+character and writer, crops and centers every glyph, renders the matching
+standard glyph from the font, splits writers into train/val, and writes
+``writers/*.npy``, ``standards.npy`` and the completion marker
+``manifest.json`` (format version 1).  DiT-flow trains on this output; twist
+pairs same-character samples from it.
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,8 +22,15 @@ from fontTools.ttLib import TTFont
 import numpy as np
 from PIL import ImageFont
 
-from .data import iter_gnt, normalize_image, render_character
-from .config import ModelConfig, TrainingConfig
+from .gnt import iter_gnt
+from .image import normalize_image, render_character
+
+# Keep in sync with DiT-flow/src/config.py: ModelConfig.image_size,
+# TrainingConfig.max_references + 1 and TrainingConfig.seed.  They are plain
+# data-format defaults here so preparation does not import a training config.
+DEFAULT_IMAGE_SIZE = 64
+DEFAULT_MIN_CHARACTERS = 5
+DEFAULT_SEED = 42
 
 
 def prepare(args):
@@ -98,18 +116,17 @@ def prepare(args):
 
 
 def main():
-    model_config = ModelConfig()
-    training_config = TrainingConfig()
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--gnt-root", type=Path, required=True)
     parser.add_argument("--font", type=Path, required=True)
     parser.add_argument("--font-index", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--image-size", type=int, default=model_config.image_size)
+    parser.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     parser.add_argument("--margin", type=int, default=4)
-    parser.add_argument("--min-characters", type=int, default=training_config.max_references + 1)
+    parser.add_argument("--min-characters", type=int, default=DEFAULT_MIN_CHARACTERS)
     parser.add_argument("--val-fraction", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=training_config.seed)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     prepare(parser.parse_args())
 
 

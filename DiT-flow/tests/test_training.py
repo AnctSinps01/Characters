@@ -20,11 +20,12 @@ from PIL import Image
 import torch
 from torch.utils.data import DataLoader
 
-from src.prepare_data import prepare
 from src import Glyph2Hand, ModelConfig, TrainingConfig
-from src.data import HandwritingEpisodes, PreloadedGlyphs, iter_gnt, normalize_image, read_manifest
+from src.data import HandwritingEpisodes, PreloadedGlyphs, read_manifest
 from src.train import (evaluate, is_unstarted_run, learning_rate, make_grad_scaler,
                        metrics_json, optimizer_update, resolve_device, run)
+from glyphprep import iter_gnt, normalize_image
+from glyphprep.prepare import prepare
 
 
 def record(character="啊", width=5, height=7):

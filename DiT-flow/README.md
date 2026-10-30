@@ -8,16 +8,16 @@
 
 ## 运行位置与入口
 
-从仓库根目录进入 `DiT-flow/` 后运行以下命令；Python 包名是 `src`，`DiT-flow` 不是导入包名。依赖和字体位于仓库根目录。
+在仓库根目录（`Characters/`）运行以下命令；Python 包名是 `src`，`DiT-flow` 不是导入包名。依赖和字体位于仓库根目录。
 
 ```bash
-cd DiT-flow
-python -m pip install -r ../requirements.txt
-python -m src.prepare_data --help
-python -m src.train --help
-python count_parameters.py
-python -m unittest discover -s tests -p "test_[!p]*.py" -v
+python -m pip install -r requirements.txt
+PYTHONPATH=DiT-flow python -m src.train --help
+PYTHONPATH=DiT-flow python count_parameters.py
+PYTHONPATH=DiT-flow python -m unittest discover -s DiT-flow/tests -p "test_[!p]*.py" -v
 ```
+
+共享的 CASIA 数据处理已移到根目录 [`glyphprep/`](../glyphprep/prepare.py)，见下面的“数据准备与 episode”。
 
 依赖为 PyTorch、NumPy、Pillow 和 fontTools，版本范围见 `../requirements.txt`；其中 SciPy 供 twist 使用。本训练器仅支持 CPU 或单张 CUDA GPU，没有分布式训练入口。服务器使用 CUDA 版 PyTorch；默认 BF16 要求 GPU 支持 BF16。CPU 自动使用 FP32。
 
@@ -148,11 +148,13 @@ L_flow = mean((predicted_velocity-u)²)
 
 ## 数据准备与 episode
 
+数据是 DiT-flow 与 twist 共用的，准备入口在仓库根目录的 `glyphprep`，从根目录运行：
+
 ```bash
-python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0-Regular.ttf --output ../data/prepared
+python -m glyphprep.prepare --gnt-root data/gnt --font fonts/WenJinMinchoP0-Regular.ttf --output data/prepared
 ```
 
-训练说明使用文津宋体；代码不硬编码字体，实际字体由必填 `--font` 决定。
+一次完成下载、解压和上面的准备步骤可用 `bash scripts/prepare_dataset.sh`。训练说明使用文津宋体；代码不硬编码字体，实际字体由必填 `--font` 决定。
 
 准备入口的必填参数为 `--gnt-root`、`--font`、`--output`。可选参数：`--font-index 0`、`--image-size 64`（模型默认值）、`--margin 4`、`--min-characters 5`（默认 `max_references+1`）、`--val-fraction 0.1`、`--seed 42`（训练默认种子）。修改模型图像尺寸或参考上限后，应检查预处理数据是否仍满足训练要求。
 

@@ -6,8 +6,10 @@
 
 | 路径 | 用途 |
 |---|---|
-| [`DiT-flow/`](DiT-flow/README.md) | 原 Glyph2Hand 的模型、配置、CASIA 数据处理、训练入口、测试和设计文档 |
+| [`DiT-flow/`](DiT-flow/README.md) | 原 Glyph2Hand 的模型、配置、训练入口、测试和设计文档 |
 | [`twist/`](twist/README.md) | 通用线条图 Transformer 速度场配准、双向插值与 loss |
+| [`glyphprep/`](glyphprep/prepare.py) | 公共 CASIA-HWDB 数据准备：`python -m glyphprep.prepare` 生成 DiT-flow 和 twist 共用的 `data/prepared/` |
+| [`scripts/prepare_dataset.sh`](scripts/prepare_dataset.sh) | 一键下载、解压并准备数据 |
 | `fonts/` | 公共字体资源 |
 | [`One-DM/`](One-DM/README.md) | 保留原位置的参考项目 |
 | [`readme/`](readme/README.md) | 公共技术分析；原 DiT-flow 的 LaTeX 和 PDF 已移到 `DiT-flow/readme/` |
@@ -15,7 +17,7 @@
 | [`requirements.txt`](requirements.txt) | 公共依赖，含 twist 距离场预处理使用的 SciPy |
 | `data/`、`runs/` | 数据和实验结果的根目录，按用途或实现分子目录；当前检出的仓库不含这些数据与结果 |
 
-现有 `data.py` 依赖字符标签、CASIA 和书写者采样，先随原实现保留。梯度诊断等可复用工具也先保持原来的调用关系；等 `twist` 确实需要时再提取到根目录的公共模块。
+`data/prepared/` 是两条路线共用的数据集格式（`writers/*.npy`、`standards.npy`、`manifest.json`，版本 1），由 `glyphprep` 生成一次即可。`DiT-flow/src/data.py` 只负责加载已准备的数据并按书写者采样；梯度诊断等可复用工具仍保持原来的调用关系。
 
 ## 原实现的运行位置
 

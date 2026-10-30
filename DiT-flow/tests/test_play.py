@@ -16,7 +16,7 @@ import torch
 
 from play import CANVAS_SIZE, Playground, discover_runs, make_server, read_run
 from src import Glyph2Hand, ModelConfig, sample_euler
-from src.data import normalize_image, render_character
+from glyphprep import normalize_image, render_character
 
 
 class PlaygroundTests(unittest.TestCase):

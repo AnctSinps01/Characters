@@ -1,4 +1,13 @@
 """Core model components for the handwriting generation project."""
+import sys
+from pathlib import Path
+
+# The shared data preparation package (glyphprep/) lives at the repository
+# root, one level above DiT-flow/.  Appending it keeps "python -m src.train"
+# working from both the repository root and DiT-flow/.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.append(str(_REPO_ROOT))
 
 from .config import ModelConfig, TrainingConfig
 from .flow import (

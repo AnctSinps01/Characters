@@ -1,6 +1,6 @@
 # 训练操作
 
-所有命令都在 `DiT-flow/` 内（有 `src/` 的这一层）运行，先从仓库根目录执行 `cd DiT-flow`。以下路径相对于 `DiT-flow/`；公共依赖、字体、原始数据和预处理数据位于上一级仓库根目录，训练结果使用根目录下的 `runs/DiT-flow/`。
+所有命令都在 `DiT-flow/` 内（有 `src/` 的这一层）运行，先从仓库根目录执行 `cd DiT-flow`；只有第 3 步的数据准备在仓库根目录运行。以下路径相对于 `DiT-flow/`；公共依赖、字体、原始数据和预处理数据位于上一级仓库根目录，训练结果使用根目录下的 `runs/DiT-flow/`。
 
 ## 1. 新建文件夹，放入文件
 
@@ -10,6 +10,8 @@
 | `../data/gnt/` | 放入下面两个训练集压缩包解压得到的 `.gnt` 文件，保留原文件名；不要放 Test 数据 |
 
 训练集：[Part1](https://nlpr.ia.ac.cn/databases/Download/Offline/CharData/Gnt1.1TrainPart1.zip)、[Part2](https://nlpr.ia.ac.cn/databases/Download/Offline/CharData/Gnt1.1TrainPart2.zip)。数据可以等复制到服务器后再下载、解压到 `../data/gnt/`。
+
+在仓库根目录运行 `bash scripts/prepare_dataset.sh` 可一次完成下载、解压和 `glyphprep.prepare`（默认 `data/gnt/`、`data/downloads/`、`data/prepared/`，用 `--data-root` 换位置；`--skip-prepare` 只到解压，`--python` 指定解释器）。手工下载的 ZIP 仍按上表放置。
 
 ## 2. 复制项目，安装依赖
 
@@ -22,11 +24,13 @@ python -c "import torch; assert torch.cuda.is_available(); assert torch.cuda.is_
 
 ## 3. 处理数据（只运行一次）
 
+在仓库根目录运行（数据由 DiT-flow 和 twist 共用）：
+
 ```bash
-python -m src.prepare_data --gnt-root ../data/gnt --font ../fonts/WenJinMinchoP0-Regular.ttf --output ../data/prepared
+python -m glyphprep.prepare --gnt-root data/gnt --font fonts/WenJinMinchoP0-Regular.ttf --output data/prepared
 ```
 
-自动生成 `../data/prepared/`：`writers/` 放手写图，`standards.npy` 放标准字图，`manifest.json` 放样本清单和训练/验证划分。首次运行时该目录应不存在或为空。
+自动生成 `data/prepared/`：`writers/` 放手写图，`standards.npy` 放标准字图，`manifest.json` 放样本清单和训练/验证划分。首次运行时该目录应不存在或为空。
 
 ## 4. 先训练 100 步
 
