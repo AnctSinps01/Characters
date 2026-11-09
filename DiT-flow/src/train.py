@@ -35,6 +35,7 @@ from . import (
 from .config import TrainingConfig
 from .data import HandwritingEpisodes, PreloadedGlyphs, read_manifest
 from .diagnostics import GradientSnapshot, json_number
+from .distance import chamfer_to_target
 
 
 def learning_rate(step: int, config: TrainingConfig) -> float:
@@ -97,7 +98,7 @@ def metrics_json(metrics: dict) -> str:
     return "{" + ", ".join(fields) + "}"
 
 
-def batch_loss(model, batch):
+def batch_loss(model, batch, config=None):
     flow = build_flow_matching_batch(batch["target_handwriting"])
     style = model.encode_style(
         batch["reference_handwriting"], batch["reference_standard"], batch["reference_mask"]
@@ -107,7 +108,18 @@ def batch_loss(model, batch):
         flow.state, flow.times, content, style, batch["reference_mask"]
     )
     # Accumulate the MSE in float32 even under autocast.
-    return flow_matching_loss(prediction.float(), flow.target_velocity.float())
+    loss = flow_matching_loss(prediction.float(), flow.target_velocity.float())
+    weight = 0.0 if config is None else config.distance_weight
+    if weight <= 0:
+        model.last_distance = 0.0
+        return loss
+    # x_t + (1-t)*v is the endpoint implied by the predicted velocity.
+    state = flow.state.float()
+    times = flow.times.float().reshape(-1, 1, 1, 1)
+    endpoint = (state + (1 - times) * prediction.float()).clamp(-1, 1)
+    distance = chamfer_to_target(endpoint, batch["target_handwriting"].float())
+    model.last_distance = distance.detach().item()
+    return loss + weight * distance
 
 
 def optimizer_update(model, optimizer, scaler, raw, device, precision, config,
@@ -123,7 +135,7 @@ def optimizer_update(model, optimizer, scaler, raw, device, precision, config,
         optimizer.zero_grad(set_to_none=True)
         batch = move_batch(raw, device)
         with autocast_context(device, precision):
-            loss = batch_loss(model, batch)
+            loss = batch_loss(model, batch, config)
         if not torch.isfinite(loss):
             if on_diagnostic is not None:
                 on_diagnostic({"event": "nonfinite_loss", "attempt": attempt + 1,
@@ -187,7 +199,7 @@ def evaluate(model, loader, device, precision, config, preview_path):
             for index, raw in enumerate(loader):
                 batch = move_batch(raw, device)
                 with autocast_context(device, precision):
-                    loss = batch_loss(model, batch)
+                    loss = batch_loss(model, batch, config)
                 if not torch.isfinite(loss):
                     raise FloatingPointError("non-finite validation loss")
                 total += loss.item() * len(batch["target_standard"])
@@ -497,7 +509,8 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         saved_training = dict(settings["training"])
         saved_training.pop("preload_to_gpu", None)
         config = replace(TrainingConfig(**saved_training),
-                         preload_to_gpu=local_config.preload_to_gpu)
+                         preload_to_gpu=local_config.preload_to_gpu,
+                         distance_weight=local_config.distance_weight)
     else:
         model_config = ModelConfig()
         config = local_config
@@ -677,6 +690,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
                 diagnose=(step == start_step + 1 or step % config.log_every == 0 or step == stop_step))
             completed = step
             metrics = {"step": step, "train_loss": total_loss, "lr": lr,
+                       "distance": getattr(model, "last_distance", 0.0),
                        "grad_norm": grad_norm,
                        "grad_clip_scale": min(1.0, config.gradient_clip / (grad_norm + 1e-6)),
                        "elapsed": f"{time.monotonic() - start:.8f} s"}

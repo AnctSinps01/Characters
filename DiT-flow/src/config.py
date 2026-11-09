@@ -70,6 +70,8 @@ class TrainingConfig:
     warmup_steps: int = 1_000
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
+    distance_weight: float = 5.0         # Chamfer term on the implied endpoint; 0 disables it
+                                         # (the term is ~0.005, same scale as 5% of the flow loss)
     precision: str = "bf16"
     preload_to_gpu: bool = False            # 放进显存 | 放进内存
     workers: int = 4
@@ -95,6 +97,8 @@ class TrainingConfig:
         for name in ("learning_rate", "gradient_clip"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if not math.isfinite(self.distance_weight) or self.distance_weight < 0:
+            raise ValueError("distance_weight must be finite and nonnegative")
         if not 0 <= self.min_lr_ratio <= 1:
             raise ValueError("invalid min_lr_ratio")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:

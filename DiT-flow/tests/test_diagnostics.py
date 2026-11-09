@@ -81,7 +81,7 @@ class GradientDiagnosticTests(unittest.TestCase):
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         scaler = make_grad_scaler(torch.device("cpu"), enabled=False)
         reports = []
-        with patch("src.train.batch_loss", side_effect=lambda model, batch:
+        with patch("src.train.batch_loss", side_effect=lambda *args, **kwargs:
                    InfiniteBackward.apply(model.weight).sum()):
             with self.assertRaisesRegex(FloatingPointError, "non-finite gradients in weight"):
                 optimizer_update(model, optimizer, scaler, {}, torch.device("cpu"),

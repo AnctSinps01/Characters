@@ -357,7 +357,7 @@ class TrainingTests(unittest.TestCase):
         config = TrainingConfig()
         noises = []
 
-        def large_loss(model, batch):
+        def large_loss(model, batch, config=None):
             noise = torch.rand(1, 1)
             noises.append(noise.clone())
             return model(noise).sum() * 1e5
