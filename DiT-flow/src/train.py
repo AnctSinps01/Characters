@@ -35,7 +35,7 @@ from . import (
 from .config import TrainingConfig
 from .data import HandwritingEpisodes, PreloadedGlyphs, read_manifest
 from .diagnostics import GradientSnapshot, json_number
-from .distance import chamfer_to_target
+from .style_reg import style_terms
 
 
 def learning_rate(step: int, config: TrainingConfig) -> float:
@@ -109,17 +109,54 @@ def batch_loss(model, batch, config=None):
     )
     # Accumulate the MSE in float32 even under autocast.
     loss = flow_matching_loss(prediction.float(), flow.target_velocity.float())
-    weight = 0.0 if config is None else config.distance_weight
-    if weight <= 0:
-        model.last_distance = 0.0
+    model.last_flow = loss.detach().item()
+    if config is None:
+        model.last_style = (0.0, 0.0, 0.0, 0.0)
         return loss
-    # x_t + (1-t)*v is the endpoint implied by the predicted velocity.
-    state = flow.state.float()
-    times = flow.times.float().reshape(-1, 1, 1, 1)
-    endpoint = (state + (1 - times) * prediction.float()).clamp(-1, 1)
-    distance = chamfer_to_target(endpoint, batch["target_handwriting"].float())
-    model.last_distance = distance.detach().item()
-    return loss + weight * distance
+
+    null_weight = config.null_style_weight
+    style_weights = (config.style_mean_weight, config.style_rank_weight,
+                     config.style_energy_weight)
+    if null_weight > 0 or any(weight > 0 for weight in style_weights):
+        # Same references, standard glyphs on both sides: by construction this is
+        # the "no writer residual" point.
+        null_style = model.encode_style(
+            batch["reference_standard"], batch["reference_standard"], batch["reference_mask"])
+        terms = style_terms(style, null_style, config.style_energy_target)
+        model.last_style = (terms["null_norm"].detach().item(),
+                            terms["mean_norm"].detach().item(),
+                            terms["participation_ratio"].item(),
+                            terms["energy"].item())
+        loss = loss + null_weight * terms["null_norm"]
+        loss = loss + config.style_mean_weight * terms["mean_norm"]
+        loss = loss + config.style_rank_weight * terms["rank_loss"]
+        loss = loss + config.style_energy_weight * terms["energy_loss"]
+    else:
+        model.last_style = (0.0, 0.0, 0.0, 0.0)
+    return loss
+
+
+def null_style_augment(batch, probability):
+    """Replace a share of episodes by their null-style twin.
+
+    Reference handwriting becomes the reference standards and the target becomes
+    the target standard, so "no writer residual" is explicitly supervised to
+    produce printed glyphs rather than a neutral handwriting.
+    """
+    if probability <= 0:
+        return batch
+    total = batch["target_handwriting"].shape[0]
+    selected = torch.rand(total, device=batch["target_handwriting"].device) < probability
+    if not bool(selected.any()):
+        return batch
+    augmented = dict(batch)
+    target = batch["target_handwriting"].clone()
+    references = batch["reference_handwriting"].clone()
+    target[selected] = batch["target_standard"][selected]
+    references[selected] = batch["reference_standard"][selected]
+    augmented["target_handwriting"] = target
+    augmented["reference_handwriting"] = references
+    return augmented
 
 
 def optimizer_update(model, optimizer, scaler, raw, device, precision, config,
@@ -133,7 +170,7 @@ def optimizer_update(model, optimizer, scaler, raw, device, precision, config,
             if cuda_rng is not None:
                 torch.cuda.set_rng_state(cuda_rng, device)
         optimizer.zero_grad(set_to_none=True)
-        batch = move_batch(raw, device)
+        batch = null_style_augment(move_batch(raw, device), config.standard_episode_prob)
         with autocast_context(device, precision):
             loss = batch_loss(model, batch, config)
         if not torch.isfinite(loss):
@@ -195,7 +232,7 @@ def evaluate(model, loader, device, precision, config, preview_path):
     try:
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(config.seed + 10_000)
-            total, samples = 0.0, 0
+            total, flow_total, samples = 0.0, 0.0, 0
             for index, raw in enumerate(loader):
                 batch = move_batch(raw, device)
                 with autocast_context(device, precision):
@@ -203,6 +240,7 @@ def evaluate(model, loader, device, precision, config, preview_path):
                 if not torch.isfinite(loss):
                     raise FloatingPointError("non-finite validation loss")
                 total += loss.item() * len(batch["target_standard"])
+                flow_total += getattr(model, "last_flow", 0.0) * len(batch["target_standard"])
                 samples += len(batch["target_standard"])
                 if index == 0:
                     preview = {key: value[:4] for key, value in batch.items()}
@@ -216,7 +254,8 @@ def evaluate(model, loader, device, precision, config, preview_path):
             if not torch.isfinite(generated).all():
                 raise FloatingPointError("non-finite generated image")
             save_preview(preview, generated, preview_path)
-        return total / samples
+        model.last_val_total = total / samples
+        return flow_total / samples
     finally:
         model.train(was_training)
 
@@ -295,7 +334,7 @@ def is_unstarted_run(output: Path, settings: dict, fingerprint: str,
         previous = json.loads(metadata.read_text(encoding="utf-8"))
         if not isinstance(previous, dict):
             return False
-        if comparable_settings(previous.get("settings")) != comparable_settings(settings) \
+        if not settings_match(previous.get("settings"), settings) \
                 or previous.get("data_fingerprint") != fingerprint \
                 or previous.get("data_selection") != data_selection:
             return False
@@ -321,6 +360,23 @@ def comparable_settings(settings):
     if isinstance(training, dict):
         training.pop("preload_to_gpu", None)
     return settings
+
+
+def settings_match(saved, current):
+    """True when every saved field still agrees with the current configuration.
+
+    Fields added to the config dataclasses after a run started are ignored, so
+    resuming an older run does not fail just because it lacks a new key.  A
+    field that disappeared or changed still counts as a different run.
+    """
+    saved = comparable_settings(saved)
+    current = comparable_settings(current)
+    if not isinstance(saved, dict) or not isinstance(current, dict):
+        return saved == current
+    for key, value in saved.items():
+        if key not in current or not settings_match(value, current[key]):
+            return False
+    return True
 
 
 def _eligible_train_writers(manifest: dict, config: TrainingConfig) -> list[dict]:
@@ -493,6 +549,11 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         dataset_size: int | None = None):
     device = resolve_device(args.device)
     local_config = TrainingConfig()
+    for name in ("standard_episode_prob", "null_style_weight", "style_mean_weight",
+                 "style_rank_weight", "style_energy_weight", "style_energy_target"):
+        value = getattr(args, name, None)
+        if value is not None:
+            local_config = replace(local_config, **{name: value})
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True) if args.resume else None
     if checkpoint is not None and checkpoint.get("version") in (1, 2, 3, 4, 5):
         raise ValueError(
@@ -508,11 +569,28 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         model_config = ModelConfig(**settings["model"])
         saved_training = dict(settings["training"])
         saved_training.pop("preload_to_gpu", None)
-        config = replace(TrainingConfig(**saved_training),
-                         preload_to_gpu=local_config.preload_to_gpu,
-                         distance_weight=local_config.distance_weight)
+        # Runtime-only and loss-weight options follow the current config; the
+        # null-style share keeps the saved value unless the CLI overrides it,
+        # otherwise resuming would silently disable the augmentation.
+        overrides = {
+            "preload_to_gpu": local_config.preload_to_gpu,
+            "null_style_weight": local_config.null_style_weight,
+            "style_mean_weight": local_config.style_mean_weight,
+            "style_rank_weight": local_config.style_rank_weight,
+            "style_energy_weight": local_config.style_energy_weight,
+            "style_energy_target": local_config.style_energy_target,
+        }
+        if getattr(args, "standard_episode_prob", None) is not None:
+            overrides["standard_episode_prob"] = args.standard_episode_prob
+        config = replace(TrainingConfig(**saved_training), **overrides)
     else:
-        model_config = ModelConfig()
+        # Model-size overrides only apply to new runs; a resume keeps the
+        # architecture stored in the checkpoint.
+        overrides = {key: value
+                     for key in ("hidden_size", "num_heads", "local_depth",
+                                 "content_depth", "generator_depth")
+                     if (value := getattr(args, key, None)) is not None}
+        model_config = replace(ModelConfig(), **overrides) if overrides else ModelConfig()
         config = local_config
     saved_training = asdict(config)
     saved_training.pop("preload_to_gpu")
@@ -554,7 +632,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
     if checkpoint and (args.output / "run.json").exists():
         previous = json.loads((args.output / "run.json").read_text(encoding="utf-8"))
         previous_selection = previous.get("data_selection")
-        if comparable_settings(previous["settings"]) != comparable_settings(settings) \
+        if not settings_match(previous["settings"], settings) \
                 or previous["data_fingerprint"] != fingerprint \
                 or previous_selection != data_selection:
             raise ValueError("output belongs to another run; choose a new output directory")
@@ -594,7 +672,15 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scaler.load_state_dict(checkpoint["scaler"])
-        best = checkpoint["best_val_loss"]
+        # A different objective makes the saved best incomparable: reset it so
+        # best.pt is written under the current weights.
+        saved = checkpoint["settings"]["training"]
+        changed = any(saved.get(key, 0.0) != getattr(config, key)
+                      for key in ("null_style_weight", "style_mean_weight", "style_rank_weight",
+                                  "style_energy_weight", "style_energy_target"))
+        best = float("inf") if changed else checkpoint["best_val_loss"]
+        if changed:
+            print("objective weights changed; best_val_loss reset", flush=True)
         torch.set_rng_state(checkpoint["cpu_rng"])
         if device.type == "cuda" and checkpoint["cuda_rng"] is not None:
             torch.cuda.set_rng_state(checkpoint["cuda_rng"], device)
@@ -690,7 +776,11 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
                 diagnose=(step == start_step + 1 or step % config.log_every == 0 or step == stop_step))
             completed = step
             metrics = {"step": step, "train_loss": total_loss, "lr": lr,
-                       "distance": getattr(model, "last_distance", 0.0),
+                       "train_flow": getattr(model, "last_flow", 0.0),
+                       "null_norm": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[0],
+                       "style_mean": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[1],
+                       "style_pr": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[2],
+                       "style_energy": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[3],
                        "grad_norm": grad_norm,
                        "grad_clip_scale": min(1.0, config.gradient_clip / (grad_norm + 1e-6)),
                        "elapsed": f"{time.monotonic() - start:.8f} s"}
@@ -700,6 +790,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
                 val_loss = evaluate(model, val_loader, device, precision, config,
                                     args.output / "previews" / f"step_{step:07d}.png")
                 metrics["val_loss"] = val_loss
+                metrics["val_total"] = getattr(model, "last_val_total", val_loss)
                 improved = val_loss < best
                 best = min(best, val_loss)
             if step % config.log_every == 0 or "val_loss" in metrics or final:
@@ -738,6 +829,27 @@ def main(*, single_writer: bool = False, subset_size: int | None = None,
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     parser.add_argument("--workers", type=int, help="override loader workers, also allowed on resume")
     parser.add_argument("--stop-after", type=int, help="stop at this absolute optimizer step without changing LR schedule")
+    parser.add_argument("--standard-episode-prob", type=float, default=None,
+                        help="share of episodes replaced by the null-style twin "
+                             "(standard glyphs as both references and target)")
+    parser.add_argument("--null-style-weight", type=float, default=None,
+                        help="weight on ||pooled null style||^2, the printed mode sits at the origin")
+    parser.add_argument("--style-mean-weight", type=float, default=None,
+                        help="weight on ||batch mean of writer style||^2, removes the shared direction")
+    parser.add_argument("--style-rank-weight", type=float, default=None,
+                        help="weight on 1 - PR/(B-1), maximises the effective rank of the style cloud")
+    parser.add_argument("--style-energy-weight", type=float, default=None,
+                        help="weight on (E||v||^2 - target)^2, pins the style scale")
+    parser.add_argument("--style-energy-target", type=float, default=None,
+                        help="target mean squared norm of the pooled writer style tokens")
+    for name, help_text in (
+        ("--hidden-size", "token width of a new run"),
+        ("--num-heads", "attention heads of a new run"),
+        ("--local-depth", "reference joint-attention layers of a new run"),
+        ("--content-depth", "content encoder layers of a new run"),
+        ("--generator-depth", "generator blocks of a new run"),
+    ):
+        parser.add_argument(name, type=int, default=None, help=help_text)
     if single_writer:
         parser.add_argument("--writer-id", help="training writer ID; defaults to the writer with most characters")
     args = parser.parse_args()
