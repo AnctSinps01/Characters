@@ -114,23 +114,31 @@ def batch_loss(model, batch, config=None):
         model.last_style = (0.0, 0.0, 0.0, 0.0)
         return loss
 
+    if config is None:
+        model.last_style = (0.0, 0.0, 0.0, 0.0)
+        return loss
+
     null_weight = config.null_style_weight
     style_weights = (config.style_mean_weight, config.style_rank_weight,
-                     config.style_energy_weight)
+                     config.style_norm_weight)
     if null_weight > 0 or any(weight > 0 for weight in style_weights):
-        # Same references, standard glyphs on both sides: by construction this is
-        # the "no writer residual" point.
         null_style = model.encode_style(
             batch["reference_standard"], batch["reference_standard"], batch["reference_mask"])
-        terms = style_terms(style, null_style, config.style_energy_target)
+        trunk_styles = [block.style_memory_norm(style) for block in model.generator.blocks]
+        trunk_null_styles = [block.style_memory_norm(null_style)
+                             for block in model.generator.blocks]
+        style_mask = batch["reference_mask"].repeat_interleave(
+            model.config.description_tokens, dim=1)
+        terms = style_terms(trunk_styles, trunk_null_styles, style_mask,
+                            config.style_norm_target)
         model.last_style = (terms["null_norm"].detach().item(),
                             terms["mean_norm"].detach().item(),
                             terms["participation_ratio"].item(),
-                            terms["energy"].item())
+                            terms["mean_token_norm"].item())
         loss = loss + null_weight * terms["null_norm"]
         loss = loss + config.style_mean_weight * terms["mean_norm"]
         loss = loss + config.style_rank_weight * terms["rank_loss"]
-        loss = loss + config.style_energy_weight * terms["energy_loss"]
+        loss = loss + config.style_norm_weight * terms["token_norm_loss"]
     else:
         model.last_style = (0.0, 0.0, 0.0, 0.0)
     return loss
@@ -550,7 +558,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
     device = resolve_device(args.device)
     local_config = TrainingConfig()
     for name in ("standard_episode_prob", "null_style_weight", "style_mean_weight",
-                 "style_rank_weight", "style_energy_weight", "style_energy_target"):
+                 "style_rank_weight", "style_norm_weight", "style_norm_target"):
         value = getattr(args, name, None)
         if value is not None:
             local_config = replace(local_config, **{name: value})
@@ -577,8 +585,8 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
             "null_style_weight": local_config.null_style_weight,
             "style_mean_weight": local_config.style_mean_weight,
             "style_rank_weight": local_config.style_rank_weight,
-            "style_energy_weight": local_config.style_energy_weight,
-            "style_energy_target": local_config.style_energy_target,
+            "style_norm_weight": local_config.style_norm_weight,
+            "style_norm_target": local_config.style_norm_target,
         }
         if getattr(args, "standard_episode_prob", None) is not None:
             overrides["standard_episode_prob"] = args.standard_episode_prob
@@ -677,7 +685,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
         saved = checkpoint["settings"]["training"]
         changed = any(saved.get(key, 0.0) != getattr(config, key)
                       for key in ("null_style_weight", "style_mean_weight", "style_rank_weight",
-                                  "style_energy_weight", "style_energy_target"))
+                                  "style_norm_weight", "style_norm_target"))
         best = float("inf") if changed else checkpoint["best_val_loss"]
         if changed:
             print("objective weights changed; best_val_loss reset", flush=True)
@@ -780,7 +788,7 @@ def run(args, *, single_writer: bool = False, subset_size: int | None = None,
                        "null_norm": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[0],
                        "style_mean": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[1],
                        "style_pr": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[2],
-                       "style_energy": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[3],
+                       "style_norm": getattr(model, "last_style", (0.0, 0.0, 0.0, 0.0))[3],
                        "grad_norm": grad_norm,
                        "grad_clip_scale": min(1.0, config.gradient_clip / (grad_norm + 1e-6)),
                        "elapsed": f"{time.monotonic() - start:.8f} s"}
@@ -833,15 +841,15 @@ def main(*, single_writer: bool = False, subset_size: int | None = None,
                         help="share of episodes replaced by the null-style twin "
                              "(standard glyphs as both references and target)")
     parser.add_argument("--null-style-weight", type=float, default=None,
-                        help="weight on ||pooled null style||^2, the printed mode sits at the origin")
+                        help="weight on per-dimension squared norm of post-normalization null tokens")
     parser.add_argument("--style-mean-weight", type=float, default=None,
-                        help="weight on ||batch mean of writer style||^2, removes the shared direction")
+                        help="weight on per-dimension same-position batch-mean norm")
     parser.add_argument("--style-rank-weight", type=float, default=None,
-                        help="weight on 1 - PR/(B-1), maximises the effective rank of the style cloud")
-    parser.add_argument("--style-energy-weight", type=float, default=None,
-                        help="weight on (E||v||^2 - target)^2, pins the style scale")
-    parser.add_argument("--style-energy-target", type=float, default=None,
-                        help="target mean squared norm of the pooled writer style tokens")
+                        help="weight on 1 - participation_ratio/(batch_size-1)")
+    parser.add_argument("--style-norm-weight", type=float, default=None,
+                        help="weight on squared error of mean post-normalization token L2 norm")
+    parser.add_argument("--style-norm-target", type=float, default=None,
+                        help="target mean L2 norm for the style tokens read by trunk attention")
     for name, help_text in (
         ("--hidden-size", "token width of a new run"),
         ("--num-heads", "attention heads of a new run"),

@@ -147,6 +147,7 @@ def main() -> None:
 
         sheet(style_a, style_b, "interp_writer_a_to_b", writer_a["id"], writer_b["id"])
         sheet(style_a, style_null, "interp_writer_a_to_printed", writer_a["id"], "printed")
+        sheet(style_a, torch.zeros_like(style_a), "interp_writer_a_to_zero", writer_a["id"], "zero")
 
 
 if __name__ == "__main__":

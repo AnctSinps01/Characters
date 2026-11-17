@@ -71,11 +71,11 @@ class TrainingConfig:
     weight_decay: float = 0.01
     gradient_clip: float = 1.0
     standard_episode_prob: float = 0.0   # share of episodes whose references AND target are standard glyphs
-    null_style_weight: float = 0.0       # weight on ||pooled null style||^2, drives the printed mode to zero
-    style_mean_weight: float = 0.0       # weight on ||batch mean of writer style||^2, removes the shared direction
-    style_rank_weight: float = 0.0       # weight on 1 - PR/(B-1), maximises the effective rank
-    style_energy_weight: float = 0.0     # weight on (E||v||^2 - style_energy_target)^2, pins the scale
-    style_energy_target: float = 1.0     # target mean squared norm of the pooled writer style
+    null_style_weight: float = 0.0       # weight on per-dimension null token energy
+    style_mean_weight: float = 0.0       # weight on per-dimension same-position batch mean energy
+    style_rank_weight: float = 0.0       # weight on 1 - PR/(B-1), maximises effective rank
+    style_norm_weight: float = 0.0       # weight on (mean actual style-token L2 norm - target)^2
+    style_norm_target: float = 1.0       # target mean L2 norm of post-style_memory_norm tokens
     precision: str = "bf16"
     preload_to_gpu: bool = False            # 放进显存 | 放进内存
     workers: int = 4
@@ -104,11 +104,11 @@ class TrainingConfig:
         if not math.isfinite(self.standard_episode_prob) or not 0 <= self.standard_episode_prob <= 1:
             raise ValueError("standard_episode_prob must be in [0, 1]")
         for name in ("null_style_weight", "style_mean_weight",
-                     "style_rank_weight", "style_energy_weight"):
+                     "style_rank_weight", "style_norm_weight"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
-        if not math.isfinite(self.style_energy_target) or self.style_energy_target <= 0:
-            raise ValueError("style_energy_target must be finite and positive")
+        if not math.isfinite(self.style_norm_target) or self.style_norm_target <= 0:
+            raise ValueError("style_norm_target must be finite and positive")
         if not 0 <= self.min_lr_ratio <= 1:
             raise ValueError("invalid min_lr_ratio")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
