@@ -62,6 +62,43 @@ Outputs: `run.json`, `metrics.jsonl`, `previews/<split>_<step>.png` (input / mea
 python -m VAE.train --data data/prepared --output runs/VAE/p0 --resume runs/VAE/p0/last.pt ...same flags...
 ```
 
+## Results (2026-11-23, stopped at ~130k steps)
+
+Full validation split (89,796 images, unseen writers); `IoU` and `ink MAE` use the same
+ink threshold (grey < 96); `rate` is `KL` converted to bits per image.
+
+| run | latent | β | rate | MAE | ink MAE | IoU | PSNR | std MAE | std IoU | retrieval top-1 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `p0` | 4×8×8 = 256 | 1e-4 | 1,265 bit | 2.18 | 9.35 | 0.598 | 32.76 | 14.33 | 0.795 | 21.9 % |
+| `beta1e3` | 4×8×8 = 256 | 1e-3 | 730 bit | 2.30 | 10.10 | 0.576 | 32.38 | 12.95 | 0.876 | 13.9 % |
+| `lat2` | 2×8×8 = 128 | 1e-4 | 761 bit | 3.28 | 14.91 | 0.459 | 29.14 | 17.84 | 0.735 | 38.4 % |
+| `grid4` (deleted) | 4×4×4 = 64 | 1e-4 | 416 bit | 5.98 | 27.69 | 0.522 | 24.39 | 28.07 | 0.654 | 48.6 % |
+
+`retrieval top-1` is leave-one-writer-out nearest neighbour among 256 characters × 24
+validation writers (chance ≈ 0.4 %). `grid4`'s weights were removed at the user's request;
+only `runs/VAE/grid4_retrieval.json` and its log survive.
+
+Findings:
+
+1. **Width matters at fixed rate.** At ~750 bit, the 256-dimensional `beta1e3` beats the
+   128-dimensional `lat2` on every reconstruction metric (MAE 2.30 vs 3.28; ink MAE 10.1 vs
+   14.9; IoU 0.576 vs 0.459). Squeezing bits with β is cheaper than removing dimensions.
+2. **Narrower latents trade fidelity for character separability.** Retrieval rises
+   21.9 % → 38.4 % → 48.6 % as the bottleneck shrinks 256 → 128 → 64, while IoU falls.
+   A larger latent keeps appearance (writer, thickness) and that hurts cross-writer retrieval.
+3. **No writer overfitting.** Training and validation MAE differ by ≈ 0.02 at equal steps,
+   and 8.16 M parameters (≈ 16 MB fp16) cannot hold 800 k images.
+4. **Printed glyphs: shape transfers, ink does not.** On the standard bank IoU is 0.74–0.88
+   but ink MAE is 45–63 (handwriting: 9–10), i.e. reconstructions are structurally right and
+   too light. This is out-of-distribution behaviour, not a memorisation measure.
+5. **Plateau.** Between 122 k and 136 k steps, MAE moved < 0.01 per 7.5 k steps while KL stayed
+   flat, so these β values had converged. No further gain expected from more steps at the
+   same configuration.
+
+Not measured: character-level generalisation. Both splits share all 3,755 classes, so these
+results cannot distinguish "general glyph code" from "one stored template per character";
+a character-holdout run would be needed.
+
 ## Tests
 
 ```powershell

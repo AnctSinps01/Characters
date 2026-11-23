@@ -12,19 +12,27 @@ class VAEConfig:
     image_size: int = 64
     base_channels: int = 64
     latent_channels: int = 4
+    latent_downsample: int = 8
 
     def __post_init__(self):
-        for name in ("image_size", "base_channels", "latent_channels"):
+        for name in ("image_size", "base_channels", "latent_channels", "latent_downsample"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if self.image_size % 8:
-            raise ValueError("image_size must be divisible by 8")
+        if self.image_size % self.latent_downsample:
+            raise ValueError("image_size must be divisible by latent_downsample")
+        if self.latent_downsample < 8 or self.latent_downsample & (self.latent_downsample - 1):
+            raise ValueError("latent_downsample must be a power of two and at least 8")
         if self.base_channels % 8:
             raise ValueError("base_channels must be divisible by 8 for GroupNorm")
 
     @property
+    def levels(self):
+        return int(math.log2(self.latent_downsample))
+
+    @property
     def latent_shape(self):
-        return (self.latent_channels, self.image_size // 8, self.image_size // 8)
+        side = self.image_size // self.latent_downsample
+        return (self.latent_channels, side, side)
 
 
 def norm(channels):
@@ -53,24 +61,25 @@ class GlyphVAE(nn.Module):
         super().__init__()
         self.config = config
         c = config.base_channels
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, c, 3, padding=1), ResidualBlock(c),
-            nn.Conv2d(c, c * 2, 4, stride=2, padding=1), ResidualBlock(c * 2),
-            nn.Conv2d(c * 2, c * 4, 4, stride=2, padding=1), ResidualBlock(c * 4),
-            nn.Conv2d(c * 4, c * 4, 4, stride=2, padding=1), ResidualBlock(c * 4),
-            norm(c * 4), nn.SiLU(),
-            nn.Conv2d(c * 4, config.latent_channels * 2, 3, padding=1),
-        )
-        self.decoder = nn.Sequential(
-            nn.Conv2d(config.latent_channels, c * 4, 3, padding=1), ResidualBlock(c * 4),
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(c * 4, c * 4, 3, padding=1), ResidualBlock(c * 4),
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(c * 4, c * 2, 3, padding=1), ResidualBlock(c * 2),
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(c * 2, c, 3, padding=1), ResidualBlock(c),
-            norm(c), nn.SiLU(), nn.Conv2d(c, 1, 3, padding=1), nn.Tanh(),
-        )
+        # Channel ladder: c, 2c, 4c, 4c, ... capped at 4c. For the default
+        # three levels this is exactly the original c,2c,4c,4c network.
+        channels = [c] + [c * min(2 ** (i + 1), 4) for i in range(config.levels)]
+        encoder = [nn.Conv2d(1, channels[0], 3, padding=1), ResidualBlock(channels[0])]
+        for previous, current in zip(channels[:-1], channels[1:]):
+            encoder += [nn.Conv2d(previous, current, 4, stride=2, padding=1),
+                        ResidualBlock(current)]
+        encoder += [norm(channels[-1]), nn.SiLU(),
+                    nn.Conv2d(channels[-1], config.latent_channels * 2, 3, padding=1)]
+        self.encoder = nn.Sequential(*encoder)
+
+        decoder = [nn.Conv2d(config.latent_channels, channels[-1], 3, padding=1),
+                   ResidualBlock(channels[-1])]
+        for source, target in zip(channels[-1:0:-1], channels[-2::-1]):
+            decoder += [nn.Upsample(scale_factor=2, mode="nearest"),
+                        nn.Conv2d(source, target, 3, padding=1), ResidualBlock(target)]
+        decoder += [norm(channels[0]), nn.SiLU(),
+                    nn.Conv2d(channels[0], 1, 3, padding=1), nn.Tanh()]
+        self.decoder = nn.Sequential(*decoder)
 
     def encode(self, images: Tensor):
         expected = (1, self.config.image_size, self.config.image_size)

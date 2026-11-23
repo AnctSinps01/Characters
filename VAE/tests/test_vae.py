@@ -47,7 +47,23 @@ class ModelTests(unittest.TestCase):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
         self.assertLessEqual(a.abs().max().item(), 1)
 
-    def test_reparameterization_noise_and_gradient(self):
+    def test_downsample_variants_change_latent_shape(self):
+        coarse = GlyphVAE(VAEConfig(image_size=64, base_channels=8, latent_channels=4,
+                                    latent_downsample=16))
+        y, mu, _ = coarse(torch.randn(2, 1, 64, 64))
+        self.assertEqual(tuple(mu.shape[1:]), (4, 4, 4))
+        self.assertEqual(tuple(y.shape), (2, 1, 64, 64))
+        narrow = GlyphVAE(VAEConfig(image_size=64, base_channels=8, latent_channels=2))
+        self.assertEqual(tuple(narrow.encode(torch.randn(1, 1, 64, 64))[0].shape[1:]), (2, 8, 8))
+        with self.assertRaises(ValueError):
+            VAEConfig(latent_downsample=12)
+
+    def test_default_architecture_width_is_unchanged(self):
+        model = GlyphVAE(VAEConfig())
+        self.assertEqual(sum(p.numel() for p in model.parameters()), 8157577)
+        self.assertEqual(model.config.latent_shape, (4, 8, 8))
+
+
         mu = torch.randn(3, 2, requires_grad=True)
         lv = torch.zeros(3, 2, requires_grad=True)
         z = self.model.reparameterize(mu, lv, noise=torch.ones_like(mu))
@@ -181,7 +197,8 @@ class TrainingTests(StoreTest):
                 kl_warmup_steps=0, validate_every=1, save_every=1, log_every=1,
                 val_samples=0, precision='fp32')
             args = SimpleNamespace(**asdict(cfg), data=root/'data', output=root/'run',
-                                   base_channels=8, latent_channels=2, device='cpu', resume=None)
+                                   base_channels=8, latent_channels=2,
+                                   latent_downsample=8, device='cpu', resume=None)
             backup = root / 'step1.pt'
             def save_and_copy(state, path):
                 atomic_save(state, path)

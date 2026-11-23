@@ -155,21 +155,29 @@ def run(args):
     config = TrainConfig(**{k: getattr(args, k) for k in TrainConfig.__dataclass_fields__})
     store = GlyphStore(args.data)
     mc = VAEConfig(image_size=store.image_size, base_channels=args.base_channels,
-                   latent_channels=args.latent_channels)
+                   latent_channels=args.latent_channels,
+                   latent_downsample=args.latent_downsample)
     if device.type == "cuda" and config.precision == "bf16" and not torch.cuda.is_bf16_supported():
         raise ValueError("GPU does not support bf16; use --precision fp32")
     out = Path(args.output)
     checkpoint = None
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+        # Checkpoints written before latent_downsample existed used 8.
+        saved_model = dict(checkpoint["model_config"])
+        saved_model.setdefault("latent_downsample", 8)
+        saved_run = dict(json.loads((Path(args.output) / "run.json").read_text(encoding="utf-8"))["model"]) \
+            if (Path(args.output) / "run.json").exists() else None
+        if saved_run is not None:
+            saved_run.setdefault("latent_downsample", 8)
         expected = (asdict(mc), asdict(config), store.fingerprint)
-        actual = (checkpoint["model_config"], checkpoint["training_config"], checkpoint["data_fingerprint"])
+        actual = (saved_model, checkpoint["training_config"], checkpoint["data_fingerprint"])
         if actual != expected:
             raise ValueError("resume model/training settings or dataset differ; repeat saved CLI settings")
         if not out.exists() or not (out / "run.json").exists():
             raise ValueError("resume requires the original run output directory")
         metadata = json.loads((out / "run.json").read_text(encoding="utf-8"))
-        if metadata["model"] != expected[0] or metadata["training"] != expected[1] or metadata["data_fingerprint"] != expected[2]:
+        if saved_run != expected[0] or metadata["training"] != expected[1] or metadata["data_fingerprint"] != expected[2]:
             raise ValueError("resume output belongs to another run")
         if checkpoint.get("device_type", device.type) != device.type:
             raise ValueError("resume must use the same device type as the checkpoint "
@@ -297,6 +305,7 @@ def main():
     parser.add_argument("--device", default="auto")
     parser.add_argument("--base-channels", type=int, default=64)
     parser.add_argument("--latent-channels", type=int, default=4)
+    parser.add_argument("--latent-downsample", type=int, default=8)
     for name, field in TrainConfig.__dataclass_fields__.items():
         parser.add_argument("--" + name.replace("_", "-"), type=type(field.default), default=field.default)
     run(parser.parse_args())
