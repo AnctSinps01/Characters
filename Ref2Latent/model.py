@@ -74,11 +74,9 @@ class Ref2Latent(nn.Module):
         self.config = config
         self.reference_input = nn.Linear(config.latent_dim, config.dim)
         self.standard_input = nn.Linear(config.latent_dim, config.dim)
-        self.reference_index = nn.Parameter(torch.zeros(1, config.references, config.dim))
         self.blocks = nn.ModuleList(Block(config) for _ in range(config.layers))
         self.norm = nn.LayerNorm(config.dim)
         self.output = nn.Linear(config.dim, config.latent_dim)
-        nn.init.normal_(self.reference_index, std=0.02)
 
     def forward(self, reference: Tensor, standard: Tensor) -> Tensor:
         cfg = self.config
@@ -91,7 +89,6 @@ class Ref2Latent(nn.Module):
             raise ValueError(f"latent shape must be [B, N, {expected}] and [B, {expected}]")
         batch = standard.shape[0]
         reference_tokens = self.reference_input(reference.reshape(batch, cfg.references, -1))
-        reference_tokens = reference_tokens + self.reference_index
         standard_tokens = self.standard_input(standard.reshape(batch, -1)).unsqueeze(1)
         for block in self.blocks:
             reference_tokens, standard_tokens = block(reference_tokens, standard_tokens)

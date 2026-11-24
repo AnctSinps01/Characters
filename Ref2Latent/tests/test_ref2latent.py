@@ -90,11 +90,18 @@ class ModelTests(unittest.TestCase):
         reference = torch.randn(1, 3, 2, 4, 4)
         standard = torch.randn(1, 2, 4, 4)
         model = self.model
-        # A reference token must equal Linear(flatten(latent), 32) + index bias.
         with torch.no_grad():
-            tokens = model.reference_input(reference.reshape(1, 3, -1)) + model.reference_index
+            tokens = model.reference_input(reference.reshape(1, 3, -1))
         self.assertEqual(tuple(tokens.shape), (1, 3, self.config.dim))
         self.assertEqual(model.standard_input(torch.zeros(1, 32)).shape, (1, self.config.dim))
+
+    def test_reference_order_is_irrelevant(self):
+        # No positional or index embedding: permuting references changes nothing.
+        reference = torch.randn(2, 3, 2, 4, 4)
+        standard = torch.randn(2, 2, 4, 4)
+        order = torch.tensor([2, 0, 1])
+        torch.testing.assert_close(self.model(reference, standard),
+                                   self.model(reference[:, order], standard))
 
     def test_block_preserves_token_lengths(self):
         block = Block(self.config)
