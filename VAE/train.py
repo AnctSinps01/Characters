@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import signal
 import tempfile
 import time
@@ -37,12 +38,17 @@ class TrainConfig:
     save_every: int = 2500
     val_samples: int = 1024  # evenly spaced across all validation authors; 0 = full
     seed: int = 42
+    char_cos_weight: float = 0.0
+    char_cos_warmup: int = 10_000
+    chars_per_batch: int = 0
+    writers_per_char: int = 0
 
     def __post_init__(self):
         for name in ("steps", "batch_size", "log_every", "validate_every", "save_every"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("workers", "warmup_steps", "kl_warmup_steps", "val_samples"):
+        for name in ("workers", "warmup_steps", "kl_warmup_steps", "val_samples",
+                     "char_cos_warmup", "chars_per_batch", "writers_per_char"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
         if self.warmup_steps >= self.steps:
@@ -50,7 +56,7 @@ class TrainConfig:
         for name in ("learning_rate", "gradient_clip"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        for name in ("beta", "weight_decay"):
+        for name in ("beta", "weight_decay", "char_cos_weight"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         for name in ("standard_ratio", "min_lr_ratio"):
@@ -58,6 +64,14 @@ class TrainConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if self.precision not in ("bf16", "fp32"):
             raise ValueError("precision must be bf16 or fp32")
+        if self.chars_per_batch > 0 or self.char_cos_weight > 0:
+            if self.chars_per_batch < 2 or self.writers_per_char < 2:
+                raise ValueError("grouped batches need chars_per_batch and "
+                                 "writers_per_char of at least 2")
+            if self.chars_per_batch * self.writers_per_char != self.batch_size:
+                raise ValueError("chars_per_batch * writers_per_char must equal batch_size")
+            if self.standard_ratio > 0:
+                raise ValueError("grouped batches need standard_ratio 0")
 
 
 def schedule(config, step):
@@ -68,7 +82,76 @@ def schedule(config, step):
         lr = config.learning_rate * (config.min_lr_ratio + (1 - config.min_lr_ratio) *
                                      (1 + math.cos(math.pi * progress)) / 2)
     beta = config.beta * min(1.0, step / max(1, config.kl_warmup_steps))
-    return lr, beta
+    cos_weight = config.char_cos_weight * min(1.0, step / max(1, config.char_cos_warmup))
+    return lr, beta, cos_weight
+
+
+def char_cosine_terms(mean, labels):
+    """Mean (1 - cosine) over same-class, distinct-sample pairs, plus their mean cosine.
+
+    Uses the posterior mean, so the term is deterministic. Returns zeros when the
+    batch holds no such pair (for example a batch of all-distinct classes).
+    """
+    if not torch.is_tensor(labels) or len(labels) < 2:
+        return mean.new_zeros(()), mean.new_zeros(())
+    flat = mean.flatten(1)
+    unit = torch.nn.functional.normalize(flat.float(), dim=1)
+    similarity = unit @ unit.t()
+    same = labels[:, None] == labels[None, :]
+    keep = same & ~torch.eye(len(labels), dtype=torch.bool, device=labels.device)
+    if not keep.any():
+        return mean.new_zeros(()), mean.new_zeros(())
+    pair = similarity[keep]
+    return (1.0 - pair).mean(), pair.mean()
+
+
+class GroupedBatchSampler:
+    """Batches of `chars_per_batch` classes times `writers_per_char` authors each.
+
+    Indices are drawn from a fixed per-(seed, step) RNG, so a resumed run sees the
+    same batches and workers never share mutable state.
+    """
+    def __init__(self, class_indices, chars_per_batch, writers_per_char,
+                 start_step, steps, seed):
+        self.class_indices = class_indices
+        self.classes = sorted(class_indices)
+        self.chars_per_batch = chars_per_batch
+        self.writers_per_char = writers_per_char
+        self.start_step = start_step
+        self.steps = steps
+        self.seed = seed
+        if chars_per_batch > len(self.classes):
+            raise ValueError("chars_per_batch exceeds the number of classes")
+
+    def __len__(self):
+        return max(0, self.steps - self.start_step)
+
+    def __iter__(self):
+        for step in range(self.start_step, self.steps):
+            rng = random.Random(f"{self.seed}:group:{step}")
+            batch = []
+            for label in rng.sample(self.classes, self.chars_per_batch):
+                pool = self.class_indices[label]
+                if len(pool) < self.writers_per_char:
+                    raise ValueError(f"class {label} has only {len(pool)} writers")
+                batch.extend(pool[i] for i in
+                             rng.sample(range(len(pool)), self.writers_per_char))
+            yield batch
+
+
+def class_index(store, split="train"):
+    """Map class -> flat dataset indices, matching ReconstructionDataset ordering."""
+    writers = [w for w in store.writers if w["split"] == split]
+    ends = [0]
+    for w in writers:
+        ends.append(ends[-1] + len(w["labels"]))
+    table = {}
+    for wi, w in enumerate(writers):
+        base = ends[wi]
+        for row, label in enumerate(w["labels"]):
+            table.setdefault(label, []).append(base + row)
+    return table
+
 
 
 def amp(device, precision):
@@ -166,12 +249,16 @@ def run(args):
         # Checkpoints written before latent_downsample existed used 8.
         saved_model = dict(checkpoint["model_config"])
         saved_model.setdefault("latent_downsample", 8)
+        defaults = TrainConfig()
+        saved_training = dict(checkpoint["training_config"])
+        for field in TrainConfig.__dataclass_fields__:
+            saved_training.setdefault(field, getattr(defaults, field))
         saved_run = dict(json.loads((Path(args.output) / "run.json").read_text(encoding="utf-8"))["model"]) \
             if (Path(args.output) / "run.json").exists() else None
         if saved_run is not None:
             saved_run.setdefault("latent_downsample", 8)
         expected = (asdict(mc), asdict(config), store.fingerprint)
-        actual = (saved_model, checkpoint["training_config"], checkpoint["data_fingerprint"])
+        actual = (saved_model, saved_training, checkpoint["data_fingerprint"])
         if actual != expected:
             raise ValueError("resume model/training settings or dataset differ; repeat saved CLI settings")
         if not out.exists() or not (out / "run.json").exists():
@@ -212,10 +299,18 @@ def run(args):
                                  length=config.steps * config.batch_size, seed=config.seed)
     # Dedicated loader generators keep iterator creation/prefetch out of the
     # model's posterior-noise RNG, including after checkpoint resume.
-    loader = DataLoader(data, batch_size=config.batch_size,
-                        sampler=range(step * config.batch_size, len(data)),
-                        num_workers=config.workers, pin_memory=device.type == "cuda",
-                        generator=torch.Generator().manual_seed(config.seed + 50))
+    if config.chars_per_batch > 0:
+        grouped = ReconstructionDataset(store, split="train", source="handwriting")
+        sampler = GroupedBatchSampler(class_index(store), config.chars_per_batch,
+                                      config.writers_per_char, step, config.steps,
+                                      config.seed)
+        loader = DataLoader(grouped, batch_sampler=sampler, num_workers=config.workers,
+                            pin_memory=device.type == "cuda")
+    else:
+        loader = DataLoader(data, batch_size=config.batch_size,
+                            sampler=range(step * config.batch_size, len(data)),
+                            num_workers=config.workers, pin_memory=device.type == "cuda",
+                            generator=torch.Generator().manual_seed(config.seed + 50))
     val_loaders = {}
     for source in ("handwriting", "standard"):
         ds = ReconstructionDataset(store, split="val", source=source)
@@ -249,7 +344,7 @@ def run(args):
             if stop[0]:
                 break
             current = step + 1
-            lr, beta = schedule(config, current)
+            lr, beta, cos_weight = schedule(config, current)
             for group in optimizer.param_groups:
                 group["lr"] = lr
             images = raw["image"].to(device).float() / 127.5 - 1
@@ -257,14 +352,18 @@ def run(args):
             with amp(device, config.precision):
                 decoded, mu, logvar = model(images, sample=True)
                 terms = vae_loss(decoded, images, mu, logvar, beta)
-            if not torch.isfinite(terms["loss"]):
+            cos_loss, cos_sim = char_cosine_terms(mu, raw["class_index"])
+            total = terms["loss"] + cos_weight * cos_loss
+            if not torch.isfinite(total):
                 raise FloatingPointError("non-finite VAE training loss; previous checkpoints preserved")
-            terms["loss"].backward()
+            total.backward()
             grad = torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip, error_if_nonfinite=True)
             optimizer.step()
             step = current
             record = {"step": step, **{k: v.item() for k, v in terms.items()},
                       "beta": beta, "lr": lr, "grad_norm": float(grad),
+                      "char_cos_weight": cos_weight, "char_cos_loss": cos_loss.item(),
+                      "char_cos_sim": cos_sim.item(), "total_loss": total.item(),
                       "standard_fraction": raw["is_standard"].float().mean().item(),
                       "elapsed_seconds": time.monotonic() - started}
             validate = step % config.validate_every == 0 or step == config.steps

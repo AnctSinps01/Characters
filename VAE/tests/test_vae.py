@@ -121,6 +121,56 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.model.decode(torch.zeros(1, 2, 3, 3))
 
 
+class CharCosineTests(unittest.TestCase):
+    def test_char_cosine_terms(self):
+        from VAE.train import char_cosine_terms
+        loss, similarity = char_cosine_terms(torch.tensor([[1.0, 0.0], [2.0, 0.0], [0.0, 1.0]]),
+                                             torch.tensor([0, 0, 1]))
+        self.assertAlmostEqual(loss.item(), 0.0)
+        self.assertAlmostEqual(similarity.item(), 1.0)
+        loss, similarity = char_cosine_terms(torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+                                             torch.tensor([0, 0]))
+        self.assertAlmostEqual(loss.item(), 1.0)
+        self.assertAlmostEqual(similarity.item(), 0.0)
+        loss, similarity = char_cosine_terms(torch.eye(3), torch.tensor([0, 1, 2]))
+        self.assertEqual(loss.item(), 0.0)
+        self.assertEqual(similarity.item(), 0.0)
+        mean = torch.tensor([[1.0, 0.0], [0.3, 0.9]], requires_grad=True)
+        char_cosine_terms(mean, torch.tensor([0, 0]))[0].backward()
+        self.assertTrue(torch.isfinite(mean.grad).all())
+        self.assertGreater(mean.grad.abs().sum().item(), 0.0)
+
+    def test_grouped_batch_sampler(self):
+        from VAE.train import GroupedBatchSampler
+        class_indices = {c: [c * 10 + i for i in range(5)] for c in range(8)}
+        sampler = GroupedBatchSampler(class_indices, 4, 3, 0, 3, seed=7)
+        batches = list(sampler)
+        self.assertEqual([len(b) for b in batches], [12, 12, 12])
+        for batch in batches:
+            classes = [index // 10 for index in batch]
+            counts = {c: classes.count(c) for c in set(classes)}
+            self.assertEqual(len(counts), 4)
+            self.assertTrue(all(v == 3 for v in counts.values()))
+            self.assertEqual(len(set(batch)), len(batch))
+        self.assertEqual(batches, list(GroupedBatchSampler(class_indices, 4, 3, 0, 3, seed=7)))
+        self.assertEqual(len(list(GroupedBatchSampler(class_indices, 4, 3, 2, 3, seed=7))), 1)
+        self.assertEqual(list(GroupedBatchSampler(class_indices, 4, 3, 2, 3, seed=7))[0], batches[2])
+
+    def test_char_cosine_config_rules(self):
+        from VAE.train import TrainConfig, schedule
+        base = dict(char_cos_weight=3e-4, chars_per_batch=8, writers_per_char=8, batch_size=64)
+        config = TrainConfig(**base)
+        self.assertAlmostEqual(schedule(config, config.char_cos_warmup)[2], 3e-4)
+        self.assertAlmostEqual(schedule(config, 0)[2], 0.0)
+        with self.assertRaises(ValueError):
+            TrainConfig(char_cos_weight=3e-4)
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "writers_per_char": 4})
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "standard_ratio": 0.1})
+        self.assertEqual(TrainConfig(char_cos_weight=0.0).char_cos_weight, 0.0)
+
+
 class StoreTest(unittest.TestCase):
     def open_store(self, root):
         store = GlyphStore(root)
