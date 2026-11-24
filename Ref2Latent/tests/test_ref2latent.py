@@ -85,10 +85,21 @@ class ModelTests(unittest.TestCase):
                    if p.grad is None or not torch.isfinite(p.grad).all()]
         self.assertEqual(missing, [])
 
+    def test_one_latent_is_one_token(self):
+        self.assertEqual(self.config.latent_dim, 32)  # 2 channels * 4 * 4
+        reference = torch.randn(1, 3, 2, 4, 4)
+        standard = torch.randn(1, 2, 4, 4)
+        model = self.model
+        # A reference token must equal Linear(flatten(latent), 32) + index bias.
+        with torch.no_grad():
+            tokens = model.reference_input(reference.reshape(1, 3, -1)) + model.reference_index
+        self.assertEqual(tuple(tokens.shape), (1, 3, self.config.dim))
+        self.assertEqual(model.standard_input(torch.zeros(1, 32)).shape, (1, self.config.dim))
+
     def test_block_preserves_token_lengths(self):
         block = Block(self.config)
-        reference = torch.randn(2, 3 * 16, self.config.dim)
-        standard = torch.randn(2, 16, self.config.dim)
+        reference = torch.randn(2, 3, self.config.dim)
+        standard = torch.randn(2, 1, self.config.dim)
         out_reference, out_standard = block(reference, standard)
         self.assertEqual(out_reference.shape, reference.shape)
         self.assertEqual(out_standard.shape, standard.shape)

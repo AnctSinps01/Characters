@@ -24,5 +24,6 @@ class ModelConfig:
             raise ValueError("mlp_ratio must be positive")
 
     @property
-    def positions(self) -> int:
-        return self.latent_size ** 2
+    def latent_dim(self) -> int:
+        """Numbers in one latent; one latent is one token."""
+        return self.latent_channels * self.latent_size * self.latent_size

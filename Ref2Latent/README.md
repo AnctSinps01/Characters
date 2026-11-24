@@ -6,12 +6,15 @@ noise state, no timestep and no ODE; one forward pass produces the answer.
 
 ## Architecture
 
+**One latent is one token.** A 4×8×8 latent is flattened to 256 numbers and
+projected to the model width; the sequence is therefore only `n + 1` tokens.
+
 ```
-n reference latents  [B, n, 4, 8, 8]  --Linear_ref--> n*64 tokens  (+ position, + ref index)
-1 standard latent    [B,    4, 8, 8]  --Linear_std-->   64 tokens  (+ position)
+n reference latents  [B, n, 4, 8, 8]  --Linear_ref-->  n tokens  (+ reference index)
+1 standard latent    [B,    4, 8, 8]  --Linear_std-->  1 token
                      joint residual attention x L        (two QKV projections, one attention map)
                              |
-      tokens at the standard positions -> Linear -> predicted latent mean [B, 4, 8, 8]
+        the standard token -> Linear -> predicted latent mean [B, 4, 8, 8]
 ```
 
 - **Two QKV projections.** References and the standard glyph have their own
@@ -19,12 +22,11 @@ n reference latents  [B, n, 4, 8, 8]  --Linear_ref--> n*64 tokens  (+ position, 
   both groups, but the two roles are projected differently.
 - **Joint residual attention.** Each block is `x += Attn(LN(x))`, then a shared
   FFN over the concatenated sequence, added back to both groups.
-- **Readout at the standard positions.** The last 64 tokens are the standard
-  glyph's; they are mapped straight back to 4×8×8. Positions already correspond,
-  so nothing is learned for spatial correspondence.
+- **Readout from the standard token.** The single token that entered from the
+  standard glyph is mapped straight back to 4×8×8.
 
-Default size: `dim=384, heads=6, layers=6, mlp_ratio=4` -> **13.3M parameters**,
-320 tokens (4×64 references + 64 standard).
+Default size: `dim=384, heads=6, layers=6, mlp_ratio=4` -> **13.6M parameters**,
+5 tokens (4 references + 1 standard).
 
 ## Losses
 

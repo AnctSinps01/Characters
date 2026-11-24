@@ -1,7 +1,9 @@
-"""Joint residual attention over reference and standard-glyph latents."""
-from __future__ import annotations
+"""Joint residual attention over reference latents and one standard-glyph latent.
 
-import math
+One latent is one token: a 4x8x8 latent is flattened to 256 numbers, projected to
+the model width, and attends to every other latent in the batch item.
+"""
+from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
@@ -20,7 +22,6 @@ class JointAttention(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.heads = config.heads
-        self.scale = (config.dim // config.heads) ** -0.5
         self.reference_qkv = nn.Linear(config.dim, config.dim * 3)
         self.standard_qkv = nn.Linear(config.dim, config.dim * 3)
         self.out = nn.Linear(config.dim, config.dim)
@@ -36,11 +37,8 @@ class JointAttention(nn.Module):
         q_std, k_std, v_std = self._split(self.standard_qkv, standard)
         key = torch.cat([k_ref, k_std], dim=2)
         value = torch.cat([v_ref, v_std], dim=2)
-        dropout = 0.0
-        out_ref = torch.nn.functional.scaled_dot_product_attention(
-            q_ref, key, value, dropout_p=dropout)
-        out_std = torch.nn.functional.scaled_dot_product_attention(
-            q_std, key, value, dropout_p=dropout)
+        out_ref = torch.nn.functional.scaled_dot_product_attention(q_ref, key, value)
+        out_std = torch.nn.functional.scaled_dot_product_attention(q_std, key, value)
         merge = lambda x: x.transpose(1, 2).reshape(x.shape[0], x.shape[2], -1)
         return self.out(merge(out_ref)), self.out(merge(out_std))
 
@@ -74,21 +72,13 @@ class Ref2Latent(nn.Module):
     def __init__(self, config: ModelConfig = ModelConfig()) -> None:
         super().__init__()
         self.config = config
-        positions = config.positions
-        self.reference_input = nn.Linear(config.latent_channels, config.dim)
-        self.standard_input = nn.Linear(config.latent_channels, config.dim)
-        self.position = nn.Parameter(torch.zeros(1, positions, config.dim))
-        self.reference_index = nn.Parameter(torch.zeros(1, config.references, 1, config.dim))
+        self.reference_input = nn.Linear(config.latent_dim, config.dim)
+        self.standard_input = nn.Linear(config.latent_dim, config.dim)
+        self.reference_index = nn.Parameter(torch.zeros(1, config.references, config.dim))
         self.blocks = nn.ModuleList(Block(config) for _ in range(config.layers))
         self.norm = nn.LayerNorm(config.dim)
-        self.output = nn.Linear(config.dim, config.latent_channels)
-        nn.init.normal_(self.position, std=0.02)
+        self.output = nn.Linear(config.dim, config.latent_dim)
         nn.init.normal_(self.reference_index, std=0.02)
-
-    def _tokens(self, latent: Tensor, projection: nn.Linear) -> Tensor:
-        batch, channels, side, _ = latent.shape
-        flat = latent.reshape(batch, channels, side * side).transpose(1, 2)  # [B, P, C]
-        return projection(flat) + self.position
 
     def forward(self, reference: Tensor, standard: Tensor) -> Tensor:
         cfg = self.config
@@ -100,15 +90,10 @@ class Ref2Latent(nn.Module):
         if tuple(reference.shape[2:]) != expected or tuple(standard.shape[1:]) != expected:
             raise ValueError(f"latent shape must be [B, N, {expected}] and [B, {expected}]")
         batch = standard.shape[0]
-        tokens = self._tokens(reference.reshape(batch * cfg.references, *expected),
-                              self.reference_input)
-        tokens = tokens.reshape(batch, cfg.references, cfg.positions, cfg.dim)
-        tokens = tokens + self.reference_index
-        reference_tokens = tokens.reshape(batch, cfg.references * cfg.positions, cfg.dim)
-        standard_tokens = self._tokens(standard, self.standard_input)
+        reference_tokens = self.reference_input(reference.reshape(batch, cfg.references, -1))
+        reference_tokens = reference_tokens + self.reference_index
+        standard_tokens = self.standard_input(standard.reshape(batch, -1)).unsqueeze(1)
         for block in self.blocks:
             reference_tokens, standard_tokens = block(reference_tokens, standard_tokens)
-        standard_tokens = self.norm(standard_tokens)
-        flat = self.output(standard_tokens)                      # [B, P, C]
-        side = cfg.latent_size
-        return flat.transpose(1, 2).reshape(batch, cfg.latent_channels, side, side)
+        flat = self.output(self.norm(standard_tokens).squeeze(1))
+        return flat.reshape(batch, cfg.latent_channels, cfg.latent_size, cfg.latent_size)
