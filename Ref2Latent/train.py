@@ -137,6 +137,13 @@ def evaluate(model, decoder, loader, device, precision):
     return result, totals["decoded"]
 
 
+def endless(loader):
+    """Repeat epochs until the step budget is reached."""
+    while True:
+        for batch in loader:
+            yield batch
+
+
 def run(args):
     device = torch.device(args.device if args.device != "auto" else
                           ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -207,7 +214,7 @@ def run(args):
     started = time.monotonic()
     model.train()
     try:
-        for raw in loader:
+        for raw in endless(loader):
             if stop[0]:
                 break
             step += 1

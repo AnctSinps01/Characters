@@ -40,6 +40,7 @@ class TrainConfig:
     seed: int = 42
     char_cos_weight: float = 0.0
     char_cos_warmup: int = 10_000
+    char_cos_temperature: float = 0.1
     chars_per_batch: int = 0
     writers_per_char: int = 0
 
@@ -64,6 +65,8 @@ class TrainConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if self.precision not in ("bf16", "fp32"):
             raise ValueError("precision must be bf16 or fp32")
+        if not math.isfinite(self.char_cos_temperature) or self.char_cos_temperature <= 0:
+            raise ValueError("char_cos_temperature must be finite and positive")
         if self.chars_per_batch > 0 or self.char_cos_weight > 0:
             if self.chars_per_batch < 2 or self.writers_per_char < 2:
                 raise ValueError("grouped batches need chars_per_batch and "
@@ -86,23 +89,32 @@ def schedule(config, step):
     return lr, beta, cos_weight
 
 
-def char_cosine_terms(mean, labels):
-    """Mean (1 - cosine) over same-class, distinct-sample pairs, plus their mean cosine.
+def char_cosine_terms(mean, labels, temperature=0.1):
+    """Supervised contrastive loss over same-class positives and the rest as negatives.
 
-    Uses the posterior mean, so the term is deterministic. Returns zeros when the
-    batch holds no such pair (for example a batch of all-distinct classes).
+    Both groups are L2-normalised posterior means; ``temperature`` scales the dot
+    products inside the softmax. Returns the loss and the mean positive/negative
+    cosines, which expose collapse (both near 1) versus separation (gap grows).
+    Returns zeros when the batch holds no same-class pair.
     """
     if not torch.is_tensor(labels) or len(labels) < 2:
-        return mean.new_zeros(()), mean.new_zeros(())
-    flat = mean.flatten(1)
-    unit = torch.nn.functional.normalize(flat.float(), dim=1)
-    similarity = unit @ unit.t()
+        return mean.new_zeros(()), mean.new_zeros(()), mean.new_zeros(())
+    unit = torch.nn.functional.normalize(mean.flatten(1).float(), dim=1)
+    cosine = unit @ unit.t()
+    device = cosine.device
+    labels = labels.to(device)
     same = labels[:, None] == labels[None, :]
-    keep = same & ~torch.eye(len(labels), dtype=torch.bool, device=labels.device)
-    if not keep.any():
-        return mean.new_zeros(()), mean.new_zeros(())
-    pair = similarity[keep]
-    return (1.0 - pair).mean(), pair.mean()
+    self_mask = torch.eye(len(labels), dtype=torch.bool, device=device)
+    positive = same & ~self_mask
+    negative = ~same
+    if not positive.any():
+        return mean.new_zeros(()), mean.new_zeros(()), mean.new_zeros(())
+    logits = cosine / temperature
+    logits = logits.masked_fill(self_mask, float("-inf"))
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    # masked_select avoids -inf * 0, which would turn the loss into NaN.
+    loss = -torch.masked_select(log_prob, positive).mean()
+    return loss, cosine[positive].mean(), cosine[negative].mean()
 
 
 class GroupedBatchSampler:
@@ -192,7 +204,8 @@ def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None)
     """Fixed posterior noise, independent of training RNG. No prior-sampling claim."""
     was_training = model.training
     model.eval()
-    totals = {k: 0.0 for k in ("mse_mean", "mse_sample", "mae_mean_255", "kl", "kl_per_image")}
+    totals = {k: 0.0 for k in ("mse_mean", "mse_sample", "mae_mean_255", "kl", "kl_per_image",
+                               "char_pos", "char_neg")}
     count = 0
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     try:
@@ -216,12 +229,18 @@ def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None)
                 totals["mae_mean_255"] += (dm - images).abs().mean().item() * 127.5 * n
                 for k in ("kl", "kl_per_image"):
                     totals[k] += terms[k].item() * n
+                labels = raw.get("class_index")
+                if torch.is_tensor(labels) and len(labels) > 1:
+                    _, positive, negative = char_cosine_terms(mu, labels)
+                    totals["char_pos"] += positive.item() * n
+                    totals["char_neg"] += negative.item() * n
                 if count == 0 and preview_path is not None:
                     preview(images, dm, decoded_sample, preview_path)
                 count += n
         if not count:
             raise ValueError("empty validation set")
         result = {k: v / count for k, v in totals.items()}
+        result["char_gap"] = result.pop("char_pos") - result.pop("char_neg")
         result.update(samples=count,
                       total_sample=result["mse_sample"] + beta * result["kl"],
                       psnr_mean_db=10 * math.log10(4 / max(result["mse_mean"], 1e-12)))
@@ -352,7 +371,8 @@ def run(args):
             with amp(device, config.precision):
                 decoded, mu, logvar = model(images, sample=True)
                 terms = vae_loss(decoded, images, mu, logvar, beta)
-            cos_loss, cos_sim = char_cosine_terms(mu, raw["class_index"])
+            cos_loss, cos_positive, cos_negative = char_cosine_terms(
+                mu, raw["class_index"], config.char_cos_temperature)
             total = terms["loss"] + cos_weight * cos_loss
             if not torch.isfinite(total):
                 raise FloatingPointError("non-finite VAE training loss; previous checkpoints preserved")
@@ -363,7 +383,8 @@ def run(args):
             record = {"step": step, **{k: v.item() for k, v in terms.items()},
                       "beta": beta, "lr": lr, "grad_norm": float(grad),
                       "char_cos_weight": cos_weight, "char_cos_loss": cos_loss.item(),
-                      "char_cos_sim": cos_sim.item(), "total_loss": total.item(),
+                      "char_cos_pos": cos_positive.item(), "char_cos_neg": cos_negative.item(),
+                      "char_cos_gap": (cos_positive - cos_negative).item(), "total_loss": total.item(),
                       "standard_fraction": raw["is_standard"].float().mean().item(),
                       "elapsed_seconds": time.monotonic() - started}
             validate = step % config.validate_every == 0 or step == config.steps

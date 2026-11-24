@@ -122,23 +122,34 @@ class ModelTests(unittest.TestCase):
 
 
 class CharCosineTests(unittest.TestCase):
-    def test_char_cosine_terms(self):
+    def test_contrastive_loss_prefers_separation(self):
         from VAE.train import char_cosine_terms
-        loss, similarity = char_cosine_terms(torch.tensor([[1.0, 0.0], [2.0, 0.0], [0.0, 1.0]]),
-                                             torch.tensor([0, 0, 1]))
-        self.assertAlmostEqual(loss.item(), 0.0)
-        self.assertAlmostEqual(similarity.item(), 1.0)
-        loss, similarity = char_cosine_terms(torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
-                                             torch.tensor([0, 0]))
-        self.assertAlmostEqual(loss.item(), 1.0)
-        self.assertAlmostEqual(similarity.item(), 0.0)
-        loss, similarity = char_cosine_terms(torch.eye(3), torch.tensor([0, 1, 2]))
+        labels = torch.tensor([0, 0, 1, 1])
+        separated = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
+        low, positive, negative = char_cosine_terms(separated, labels, temperature=0.1)
+        self.assertGreater(positive.item(), 0.99)
+        self.assertLess(negative.item(), 0.01)
+        self.assertGreater(positive.item() - negative.item(), 0.9)
+        collapsed = torch.ones(4, 2)
+        high, collapse_pos, collapse_neg = char_cosine_terms(collapsed, labels, temperature=0.1)
+        self.assertGreater(high.item(), low.item())
+        self.assertGreater(collapse_neg.item(), 0.99)   # negatives indistinguishable
+        self.assertAlmostEqual(collapse_pos.item() - collapse_neg.item(), 0.0, places=5)
+        # A batch with no negatives carries no gradient: that is expected.
+        single = torch.tensor([[1.0, 0.0], [0.3, 0.9]], requires_grad=True)
+        loss, _, _ = char_cosine_terms(single, torch.tensor([0, 0]))
         self.assertEqual(loss.item(), 0.0)
-        self.assertEqual(similarity.item(), 0.0)
-        mean = torch.tensor([[1.0, 0.0], [0.3, 0.9]], requires_grad=True)
-        char_cosine_terms(mean, torch.tensor([0, 0]))[0].backward()
+        loss.backward()
+        self.assertEqual(single.grad.abs().sum().item(), 0.0)
+        # With both classes present the gradient reaches the mean.
+        mean = torch.tensor([[1.0, 0.0], [0.3, 0.9], [0.2, 0.1], [0.9, 0.4]],
+                            requires_grad=True)
+        char_cosine_terms(mean, labels)[0].backward()
         self.assertTrue(torch.isfinite(mean.grad).all())
         self.assertGreater(mean.grad.abs().sum().item(), 0.0)
+        # No same-class pair -> zeros, not an error.
+        zero_loss, zero_pos, zero_neg = char_cosine_terms(torch.eye(3), torch.tensor([0, 1, 2]))
+        self.assertEqual((zero_loss.item(), zero_pos.item(), zero_neg.item()), (0.0, 0.0, 0.0))
 
     def test_grouped_batch_sampler(self):
         from VAE.train import GroupedBatchSampler
