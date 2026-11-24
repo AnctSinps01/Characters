@@ -72,10 +72,11 @@ class Ref2Latent(nn.Module):
     def __init__(self, config: ModelConfig = ModelConfig()) -> None:
         super().__init__()
         self.config = config
-        self.reference_input = nn.Linear(config.latent_dim, config.dim)
-        self.standard_input = nn.Linear(config.latent_dim, config.dim)
+        self.reference_mlp = nn.Sequential(nn.Linear(config.latent_dim, config.dim), nn.GELU(),
+                                           nn.Linear(config.dim, config.dim))
+        self.standard_mlp = nn.Sequential(nn.Linear(config.latent_dim, config.dim), nn.GELU(),
+                                          nn.Linear(config.dim, config.dim))
         self.blocks = nn.ModuleList(Block(config) for _ in range(config.layers))
-        self.norm = nn.LayerNorm(config.dim)
         self.output = nn.Linear(config.dim, config.latent_dim)
 
     def forward(self, reference: Tensor, standard: Tensor) -> Tensor:
@@ -88,9 +89,9 @@ class Ref2Latent(nn.Module):
         if tuple(reference.shape[2:]) != expected or tuple(standard.shape[1:]) != expected:
             raise ValueError(f"latent shape must be [B, N, {expected}] and [B, {expected}]")
         batch = standard.shape[0]
-        reference_tokens = self.reference_input(reference.reshape(batch, cfg.references, -1))
-        standard_tokens = self.standard_input(standard.reshape(batch, -1)).unsqueeze(1)
+        reference_tokens = self.reference_mlp(reference.reshape(batch, cfg.references, -1))
+        standard_tokens = self.standard_mlp(standard.reshape(batch, -1)).unsqueeze(1)
         for block in self.blocks:
             reference_tokens, standard_tokens = block(reference_tokens, standard_tokens)
-        flat = self.output(self.norm(standard_tokens).squeeze(1))
+        flat = self.output(standard_tokens.squeeze(1))
         return flat.reshape(batch, cfg.latent_channels, cfg.latent_size, cfg.latent_size)

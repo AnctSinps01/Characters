@@ -85,15 +85,18 @@ class ModelTests(unittest.TestCase):
                    if p.grad is None or not torch.isfinite(p.grad).all()]
         self.assertEqual(missing, [])
 
-    def test_one_latent_is_one_token(self):
+    def test_one_latent_is_one_token_through_an_mlp(self):
         self.assertEqual(self.config.latent_dim, 32)  # 2 channels * 4 * 4
         reference = torch.randn(1, 3, 2, 4, 4)
-        standard = torch.randn(1, 2, 4, 4)
         model = self.model
         with torch.no_grad():
-            tokens = model.reference_input(reference.reshape(1, 3, -1))
+            tokens = model.reference_mlp(reference.reshape(1, 3, -1))
         self.assertEqual(tuple(tokens.shape), (1, 3, self.config.dim))
-        self.assertEqual(model.standard_input(torch.zeros(1, 32)).shape, (1, self.config.dim))
+        self.assertEqual(model.standard_mlp(torch.zeros(1, 32)).shape, (1, self.config.dim))
+        # Each role has its own MLP and they are not weight-tied.
+        self.assertEqual(sum(p.numel() for p in model.reference_mlp.parameters()),
+                         sum(p.numel() for p in model.standard_mlp.parameters()))
+        self.assertFalse(torch.equal(model.reference_mlp[0].weight, model.standard_mlp[0].weight))
 
     def test_reference_order_is_irrelevant(self):
         # No positional or index embedding: permuting references changes nothing.

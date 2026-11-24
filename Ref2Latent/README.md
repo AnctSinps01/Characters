@@ -6,17 +6,19 @@ noise state, no timestep and no ODE; one forward pass produces the answer.
 
 ## Architecture
 
-**One latent is one token.** A 4×8×8 latent is flattened to 256 numbers and
-projected to the model width; the sequence is therefore only `n + 1` tokens.
+**One latent is one token.** A 4×8×8 latent is flattened to 256 numbers, mapped
+by that role's own MLP into one token, so the sequence is `n + 1` tokens.
 
 ```
-n reference latents  [B, n, 4, 8, 8]  --Linear_ref-->  n tokens  (+ reference index)
-1 standard latent    [B,    4, 8, 8]  --Linear_std-->  1 token
+n reference latents  [B, n, 4, 8, 8]  --MLP_ref-->  n tokens
+1 standard latent    [B,    4, 8, 8]  --MLP_std-->  1 token
                      joint residual attention x L        (two QKV projections, one attention map)
                              |
         the standard token -> Linear -> predicted latent mean [B, 4, 8, 8]
 ```
 
+- **Two MLPs.** `reference_mlp` and `standard_mlp` are separate
+  `Linear(256, dim) -> GELU -> Linear(dim, dim)` stacks.
 - **Two QKV projections.** References and the standard glyph have their own
   `qkv` linear maps; keys and values are concatenated, so every token attends to
   both groups, but the two roles are projected differently.
@@ -25,7 +27,7 @@ n reference latents  [B, n, 4, 8, 8]  --Linear_ref-->  n tokens  (+ reference in
 - **Readout from the standard token.** The single token that entered from the
   standard glyph is mapped straight back to 4×8×8.
 
-Default size: `dim=384, heads=6, layers=6, mlp_ratio=4` -> **13.6M parameters**,
+Default size: `dim=384, heads=6, layers=6, mlp_ratio=4` -> **13.9M parameters**,
 5 tokens (4 references + 1 standard).
 
 ## Losses
