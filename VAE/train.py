@@ -1,4 +1,4 @@
-﻿"""Independent glyph VAE training. Execute from Characters/: python -m VAE.train."""
+"""Independent glyph VAE training. Execute from Characters/: python -m VAE.train."""
 import argparse
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -407,7 +407,9 @@ def run(args):
                                    config.groups_per_batch, step, config.steps, config.seed)
         loader = DataLoader(grouped, batch_sampler=sampler, num_workers=config.workers,
                             pin_memory=device.type == "cuda", persistent_workers=config.workers > 0)
-        writer_ids = {w["id"]: i for i, w in enumerate(train_writers)}
+        # Grouping only needs a consistent id per writer, so cover both splits:
+        # validation also reports the author gap on held-out writers.
+        writer_ids = {w["id"]: i for i, w in enumerate(store.writers)}
     elif config.groups_per_batch > 0:
         grouped = ReconstructionDataset(store, split="train", source="handwriting")
         sampler = GroupedBatchSampler(class_index(store, key=config.contrast_key),
@@ -415,8 +417,7 @@ def run(args):
                                       step, config.steps, config.seed)
         loader = DataLoader(grouped, batch_sampler=sampler, num_workers=config.workers,
                             pin_memory=device.type == "cuda", persistent_workers=config.workers > 0)
-        writer_ids = {w["id"]: i for i, w in enumerate(
-            [w for w in store.writers if w["split"] == "train"])}
+        writer_ids = {w["id"]: i for i, w in enumerate(store.writers)}
     else:
         writer_ids = None
         loader = DataLoader(data, batch_size=config.batch_size,
