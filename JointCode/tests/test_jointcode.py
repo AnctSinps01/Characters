@@ -89,9 +89,11 @@ class ModelTests(unittest.TestCase):
         optimizer = torch.optim.Adam(model.parameters(), lr=5e-3)
         content = torch.randn(2, CHANNELS, LATENT, LATENT)
         author = torch.randn(2, CHANNELS, LATENT, LATENT)
-        target = torch.randn(2, 1, IMAGE, IMAGE).clamp(-1, 1)
+        ramp = torch.linspace(-1, 1, IMAGE)
+        smooth = (ramp[:, None] * ramp[None, :])[None, None].expand(2, 1, IMAGE, IMAGE)
+        target = smooth.contiguous()
         first = None
-        for _ in range(200):
+        for _ in range(300):
             optimizer.zero_grad()
             loss = (model(content, author) - target).square().mean()
             loss.backward()

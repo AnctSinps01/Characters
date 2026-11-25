@@ -20,6 +20,7 @@ from Ref2Latent.data import LatentStore
 from VAE.data import GlyphStore, spread_indices
 from .config import DecoderConfig
 from .data import JointCodeDataset
+from .merged import MergedDataset
 from .model import JointDecoder
 
 
@@ -133,9 +134,11 @@ def run(args):
                                    latent_size=args.latent_size,
                                    base_channels=args.base_channels)
     store = GlyphStore(args.data)
-    content = LatentStore(args.content_latents)
-    author = LatentStore(args.author_latents)
-    out = Path(args.output)
+    content = LatentStore(args.content_latents) if args.content_latents else None
+    author = LatentStore(args.author_latents) if args.author_latents else None
+    if args.merged is None and (content is None or author is None):
+        raise ValueError("pass --merged, or both --content-latents and --author-latents")
+    out = Path(args.output).resolve()
     if out.exists() and any(out.iterdir()):
         raise ValueError("output must be new/empty; refusing overwrite")
     out.mkdir(parents=True, exist_ok=True)
@@ -146,19 +149,24 @@ def run(args):
     model = JointDecoder(decoder_config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
                                   betas=(0.9, 0.999), weight_decay=config.weight_decay)
-    train_data = JointCodeDataset(store, content, author, split="train")
+    train_data = (MergedDataset(args.merged, "train") if args.merged
+                  else JointCodeDataset(store, content, author, split="train"))
     loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True,
                         num_workers=config.workers, pin_memory=device.type == "cuda",
-                        drop_last=True, generator=torch.Generator().manual_seed(config.seed + 50))
-    val_data = JointCodeDataset(store, content, author, split="val")
+                        drop_last=True, persistent_workers=config.workers > 0,
+                        generator=torch.Generator().manual_seed(config.seed + 50))
+    val_data = (MergedDataset(args.merged, "val") if args.merged
+                else JointCodeDataset(store, content, author, split="val"))
     from torch.utils.data import Subset
     val_loader = DataLoader(Subset(val_data, spread_indices(len(val_data), config.val_samples)),
                             batch_size=config.batch_size, num_workers=0)
     (out / "run.json").write_text(json.dumps({
         "decoder": asdict(decoder_config), "training": asdict(config),
         "parameters": sum(p.numel() for p in model.parameters()),
-        "content_latents": str(Path(args.content_latents).resolve()),
-        "author_latents": str(Path(args.author_latents).resolve())}, indent=2), encoding="utf-8")
+        "merged": str(Path(args.merged).resolve()) if args.merged else None,
+        "content_latents": str(Path(args.content_latents).resolve()) if args.content_latents else None,
+        "author_latents": str(Path(args.author_latents).resolve()) if args.author_latents else None},
+        indent=2), encoding="utf-8")
     print(f"device={device} parameters={sum(p.numel() for p in model.parameters()):,} "
           f"train_pairs={len(train_data)} val_pairs={len(val_data)}", flush=True)
 
@@ -228,16 +236,20 @@ def run(args):
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         store.close()
-        content.close()
-        author.close()
+        if content is not None:
+            content.close()
+        if author is not None:
+            author.close()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path("data/prepared"))
-    parser.add_argument("--content-latents", type=Path, required=True)
-    parser.add_argument("--author-latents", type=Path, required=True)
+    parser.add_argument("--content-latents", type=Path, default=None)
+    parser.add_argument("--author-latents", type=Path, default=None)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--merged", type=Path, default=None,
+                        help="directory from JointCode.prepare_merged; single-reader inputs")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--latent-channels", type=int, default=4)
     parser.add_argument("--latent-size", type=int, default=8)
