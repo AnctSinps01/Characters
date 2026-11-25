@@ -56,6 +56,11 @@ wandb/
 Thumbs.db
 desktop.ini
 
+# Scratch directories written by torch multiprocessing file-system sharing
+# (pymp-*/listener-*) and torch.distributed.rpc (tmpXXXXXXXX)
+pymp-*/
+tmp[0-9A-Za-z]*/
+
 # LaTeX build products (keep .tex sources and PDFs)
 *.aux
 *.bcf
