@@ -169,17 +169,21 @@ class CharCosineTests(unittest.TestCase):
 
     def test_char_cosine_config_rules(self):
         from VAE.train import TrainConfig, schedule
-        base = dict(char_cos_weight=3e-4, chars_per_batch=8, writers_per_char=8, batch_size=64)
+        base = dict(char_cos_weight=3e-4, groups_per_batch=8, members_per_group=8, batch_size=64)
         config = TrainConfig(**base)
         self.assertAlmostEqual(schedule(config, config.char_cos_warmup)[2], 3e-4)
         self.assertAlmostEqual(schedule(config, 0)[2], 0.0)
         with self.assertRaises(ValueError):
             TrainConfig(char_cos_weight=3e-4)
         with self.assertRaises(ValueError):
-            TrainConfig(**{**base, "writers_per_char": 4})
+            TrainConfig(**{**base, "members_per_group": 4})
         with self.assertRaises(ValueError):
             TrainConfig(**{**base, "standard_ratio": 0.1})
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "contrast_key": "painter"})
         self.assertEqual(TrainConfig(char_cos_weight=0.0).char_cos_weight, 0.0)
+        author = TrainConfig(**{**base, "contrast_key": "author"})
+        self.assertEqual(author.contrast_key, "author")
 
 
 class StoreTest(unittest.TestCase):

@@ -41,15 +41,16 @@ class TrainConfig:
     char_cos_weight: float = 0.0
     char_cos_warmup: int = 10_000
     char_cos_temperature: float = 0.1
-    chars_per_batch: int = 0
-    writers_per_char: int = 0
+    contrast_key: str = "char"
+    groups_per_batch: int = 0
+    members_per_group: int = 0
 
     def __post_init__(self):
         for name in ("steps", "batch_size", "log_every", "validate_every", "save_every"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("workers", "warmup_steps", "kl_warmup_steps", "val_samples",
-                     "char_cos_warmup", "chars_per_batch", "writers_per_char"):
+                     "char_cos_warmup", "groups_per_batch", "members_per_group"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
         if self.warmup_steps >= self.steps:
@@ -67,14 +68,19 @@ class TrainConfig:
             raise ValueError("precision must be bf16 or fp32")
         if not math.isfinite(self.char_cos_temperature) or self.char_cos_temperature <= 0:
             raise ValueError("char_cos_temperature must be finite and positive")
-        if self.chars_per_batch > 0 or self.char_cos_weight > 0:
-            if self.chars_per_batch < 2 or self.writers_per_char < 2:
-                raise ValueError("grouped batches need chars_per_batch and "
-                                 "writers_per_char of at least 2")
-            if self.chars_per_batch * self.writers_per_char != self.batch_size:
-                raise ValueError("chars_per_batch * writers_per_char must equal batch_size")
+        if self.chars_or_authors() > 0 or self.char_cos_weight > 0:
+            if self.groups_per_batch < 2 or self.members_per_group < 2:
+                raise ValueError("grouped batches need groups_per_batch and "
+                                 "members_per_group of at least 2")
+            if self.groups_per_batch * self.members_per_group != self.batch_size:
+                raise ValueError("groups_per_batch * members_per_group must equal batch_size")
             if self.standard_ratio > 0:
                 raise ValueError("grouped batches need standard_ratio 0")
+        if self.contrast_key not in ("char", "author"):
+            raise ValueError("contrast_key must be char or author")
+
+    def chars_or_authors(self):
+        return self.groups_per_batch
 
 
 def schedule(config, step):
@@ -151,8 +157,12 @@ class GroupedBatchSampler:
             yield batch
 
 
-def class_index(store, split="train"):
-    """Map class -> flat dataset indices, matching ReconstructionDataset ordering."""
+def class_index(store, split="train", key="char"):
+    """Map group key -> flat dataset indices, matching ReconstructionDataset ordering.
+
+    key="char" groups a character across authors; key="author" groups one writer's
+    characters. Both are used by GroupedBatchSampler.
+    """
     writers = [w for w in store.writers if w["split"] == split]
     ends = [0]
     for w in writers:
@@ -160,8 +170,11 @@ def class_index(store, split="train"):
     table = {}
     for wi, w in enumerate(writers):
         base = ends[wi]
-        for row, label in enumerate(w["labels"]):
-            table.setdefault(label, []).append(base + row)
+        if key == "author":
+            table[w["id"]] = list(range(base, base + len(w["labels"])))
+        else:
+            for row, label in enumerate(w["labels"]):
+                table.setdefault(label, []).append(base + row)
     return table
 
 
@@ -318,14 +331,17 @@ def run(args):
                                  length=config.steps * config.batch_size, seed=config.seed)
     # Dedicated loader generators keep iterator creation/prefetch out of the
     # model's posterior-noise RNG, including after checkpoint resume.
-    if config.chars_per_batch > 0:
+    if config.groups_per_batch > 0:
         grouped = ReconstructionDataset(store, split="train", source="handwriting")
-        sampler = GroupedBatchSampler(class_index(store), config.chars_per_batch,
-                                      config.writers_per_char, step, config.steps,
-                                      config.seed)
+        sampler = GroupedBatchSampler(class_index(store, key=config.contrast_key),
+                                      config.groups_per_batch, config.members_per_group,
+                                      step, config.steps, config.seed)
         loader = DataLoader(grouped, batch_sampler=sampler, num_workers=config.workers,
                             pin_memory=device.type == "cuda")
+        writer_ids = {w["id"]: i for i, w in enumerate(
+            [w for w in store.writers if w["split"] == "train"])}
     else:
+        writer_ids = None
         loader = DataLoader(data, batch_size=config.batch_size,
                             sampler=range(step * config.batch_size, len(data)),
                             num_workers=config.workers, pin_memory=device.type == "cuda",
@@ -371,8 +387,11 @@ def run(args):
             with amp(device, config.precision):
                 decoded, mu, logvar = model(images, sample=True)
                 terms = vae_loss(decoded, images, mu, logvar, beta)
+            labels = raw["class_index"]
+            if config.contrast_key == "author" and writer_ids is not None:
+                labels = torch.tensor([writer_ids[x] for x in raw["writer_id"]])
             cos_loss, cos_positive, cos_negative = char_cosine_terms(
-                mu, raw["class_index"], config.char_cos_temperature)
+                mu, labels, config.char_cos_temperature)
             total = terms["loss"] + cos_weight * cos_loss
             if not torch.isfinite(total):
                 raise FloatingPointError("non-finite VAE training loss; previous checkpoints preserved")
@@ -428,7 +447,16 @@ def main():
     parser.add_argument("--latent-downsample", type=int, default=8)
     for name, field in TrainConfig.__dataclass_fields__.items():
         parser.add_argument("--" + name.replace("_", "-"), type=type(field.default), default=field.default)
-    run(parser.parse_args())
+    parser.add_argument("--chars-per-batch", type=int, default=None,
+                        help="legacy alias of --groups-per-batch")
+    parser.add_argument("--writers-per-char", type=int, default=None,
+                        help="legacy alias of --members-per-group")
+    args = parser.parse_args()
+    if args.chars_per_batch is not None:
+        args.groups_per_batch = args.chars_per_batch
+    if args.writers_per_char is not None:
+        args.members_per_group = args.writers_per_char
+    run(args)
 
 
 if __name__ == "__main__":
