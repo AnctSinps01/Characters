@@ -1,4 +1,4 @@
-"""End-to-end check of the merged-file path: prepare_merged -> MergedDataset."""
+﻿"""End-to-end check of the merged-file path: prepare_merged -> MergedDataset."""
 import json
 from pathlib import Path
 import tempfile
@@ -7,9 +7,9 @@ import unittest
 import numpy as np
 import torch
 
-from JointCode.merged import MergedDataset
-from JointCode.prepare_merged import merge
-from JointCode.tests.test_jointcode import fixture
+from VAE.joint.merged import MergedDataset
+from VAE.joint.prepare_merged import merge
+from VAE.joint.tests.test_jointcode import fixture
 from Ref2Latent.data import LatentStore
 from VAE.data import GlyphStore
 

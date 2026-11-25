@@ -1,4 +1,4 @@
-"""Decode a concatenated (content code, author code) pair back to an image."""
+﻿"""Decode a concatenated (content code, author code) pair back to an image."""
 from __future__ import annotations
 
 from dataclasses import dataclass

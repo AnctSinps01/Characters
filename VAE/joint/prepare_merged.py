@@ -1,6 +1,6 @@
-"""Merge both latent spaces and the images into one contiguous file per split.
+﻿"""Merge both latent spaces and the images into one contiguous file per split.
 
-    python -m JointCode.prepare_merged --data data/prepared \
+    python -m VAE.joint.prepare_merged --data data/prepared \
         --content-latents runs/latents/c1e3 --author-latents runs/latents/a1e3 \
         --output /dev/shm/jointcode
 

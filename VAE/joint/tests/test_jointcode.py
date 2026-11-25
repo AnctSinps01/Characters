@@ -1,4 +1,4 @@
-"""Tests for the joint content+author decoder."""
+﻿"""Tests for the joint content+author decoder."""
 import json
 from pathlib import Path
 import tempfile
@@ -7,10 +7,10 @@ import unittest
 import numpy as np
 import torch
 
-from JointCode.config import DecoderConfig
-from JointCode.data import JointCodeDataset
-from JointCode.model import JointDecoder
-from JointCode.train import TrainConfig, learning_rate
+from VAE.joint.config import DecoderConfig
+from VAE.joint.data import JointCodeDataset
+from VAE.joint.model import JointDecoder
+from VAE.joint.train import TrainConfig, learning_rate
 from Ref2Latent.data import LatentStore
 from VAE.data import GlyphStore
 

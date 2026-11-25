@@ -1,4 +1,4 @@
-"""Decoder for a two-code latent: content code followed by author code."""
+﻿"""Decoder for a two-code latent: content code followed by author code."""
 from __future__ import annotations
 
 import torch

@@ -1,9 +1,10 @@
-"""Independent glyph VAE training. Execute from Characters/: python -m VAE.train."""
+﻿"""Independent glyph VAE training. Execute from Characters/: python -m VAE.train."""
 import argparse
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
 import math
+import numpy as np
 import os
 from pathlib import Path
 import random
@@ -44,6 +45,8 @@ class TrainConfig:
     contrast_key: str = "char"
     groups_per_batch: int = 0
     members_per_group: int = 0
+    content_channels: int = 0
+    author_channels: int = 0
 
     def __post_init__(self):
         for name in ("steps", "batch_size", "log_every", "validate_every", "save_every"):
@@ -68,7 +71,12 @@ class TrainConfig:
             raise ValueError("precision must be bf16 or fp32")
         if not math.isfinite(self.char_cos_temperature) or self.char_cos_temperature <= 0:
             raise ValueError("char_cos_temperature must be finite and positive")
-        if self.chars_or_authors() > 0 or self.char_cos_weight > 0:
+        if self.contrast_key == "dual":
+            if self.groups_per_batch < 2 or self.groups_per_batch ** 2 != self.batch_size:
+                raise ValueError("dual contrast needs batch_size == groups_per_batch**2")
+            if self.content_channels < 1 or self.author_channels < 1:
+                raise ValueError("dual contrast needs content_channels and author_channels")
+        elif self.chars_or_authors() > 0 or self.char_cos_weight > 0:
             if self.groups_per_batch < 2 or self.members_per_group < 2:
                 raise ValueError("grouped batches need groups_per_batch and "
                                  "members_per_group of at least 2")
@@ -76,8 +84,12 @@ class TrainConfig:
                 raise ValueError("groups_per_batch * members_per_group must equal batch_size")
             if self.standard_ratio > 0:
                 raise ValueError("grouped batches need standard_ratio 0")
-        if self.contrast_key not in ("char", "author"):
-            raise ValueError("contrast_key must be char or author")
+            if self.content_channels or self.author_channels:
+                raise ValueError("content_channels/author_channels only apply to dual contrast")
+        if self.contrast_key not in ("char", "author", "dual"):
+            raise ValueError("contrast_key must be char, author or dual")
+        if self.contrast_key == "dual" and self.standard_ratio > 0:
+            raise ValueError("dual contrast needs standard_ratio 0")
 
     def chars_or_authors(self):
         return self.groups_per_batch
@@ -157,6 +169,53 @@ class GroupedBatchSampler:
             yield batch
 
 
+class GridBatchSampler:
+    """Full character-by-author grid so one batch carries both pair types.
+
+    Layout inside a batch is character-major: sample ``i`` belongs to character
+    ``i // grid`` and author ``i % grid``. The training loop relies on that order.
+    """
+    def __init__(self, table, characters, authors, grid, start_step, steps, seed):
+        self.table = table
+        self.characters = list(characters)
+        self.authors = list(authors)
+        self.grid = grid
+        self.start_step = start_step
+        self.steps = steps
+        self.seed = seed
+        if grid > len(self.characters) or grid > len(self.authors):
+            raise ValueError("grid is larger than the available characters or authors")
+
+    def __len__(self):
+        return max(0, self.steps - self.start_step)
+
+    def __iter__(self):
+        for step in range(self.start_step, self.steps):
+            rng = random.Random(f"{self.seed}:grid:{step}")
+            chars = rng.sample(self.characters, self.grid)
+            authors = rng.sample(self.authors, self.grid)
+            batch = []
+            for char in chars:
+                for author in authors:
+                    index = int(self.table[char, author])
+                    if index < 0:
+                        raise ValueError(f"character {char} missing for author {author}")
+                    batch.append(index)
+            yield batch
+
+
+def pair_table(store, split="train"):
+    """table[class, author] -> flat dataset index; -1 where the pair is missing."""
+    writers = [w for w in store.writers if w["split"] == split]
+    base = 0
+    table = np.full((len(store.characters), len(writers)), -1, np.int64)
+    for wi, writer in enumerate(writers):
+        for row, label in enumerate(writer["labels"]):
+            table[label, wi] = base + row
+        base += len(writer["labels"])
+    return table
+
+
 def class_index(store, split="train", key="char"):
     """Map group key -> flat dataset indices, matching ReconstructionDataset ordering.
 
@@ -213,12 +272,13 @@ def preview(inputs, means, samples, path):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None):
+def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None,
+             writer_ids=None):
     """Fixed posterior noise, independent of training RNG. No prior-sampling claim."""
     was_training = model.training
     model.eval()
     totals = {k: 0.0 for k in ("mse_mean", "mse_sample", "mae_mean_255", "kl", "kl_per_image",
-                               "char_pos", "char_neg")}
+                               "char_pos", "char_neg", "author_pos", "author_neg")}
     count = 0
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     try:
@@ -247,6 +307,11 @@ def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None)
                     _, positive, negative = char_cosine_terms(mu, labels)
                     totals["char_pos"] += positive.item() * n
                     totals["char_neg"] += negative.item() * n
+                if writer_ids is not None:
+                    author_labels = torch.tensor([writer_ids[x] for x in raw["writer_id"]])
+                    _, author_pos, author_neg = char_cosine_terms(mu, author_labels)
+                    totals["author_pos"] += author_pos.item() * n
+                    totals["author_neg"] += author_neg.item() * n
                 if count == 0 and preview_path is not None:
                     preview(images, dm, decoded_sample, preview_path)
                 count += n
@@ -254,6 +319,8 @@ def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None)
             raise ValueError("empty validation set")
         result = {k: v / count for k, v in totals.items()}
         result["char_gap"] = result.pop("char_pos") - result.pop("char_neg")
+        if "author_pos" in result:
+            result["author_gap"] = result.pop("author_pos") - result.pop("author_neg")
         result.update(samples=count,
                       total_sample=result["mse_sample"] + beta * result["kl"],
                       psnr_mean_db=10 * math.log10(4 / max(result["mse_mean"], 1e-12)))
@@ -331,13 +398,23 @@ def run(args):
                                  length=config.steps * config.batch_size, seed=config.seed)
     # Dedicated loader generators keep iterator creation/prefetch out of the
     # model's posterior-noise RNG, including after checkpoint resume.
-    if config.groups_per_batch > 0:
+    if config.contrast_key == "dual":
+        grouped = ReconstructionDataset(store, split="train", source="handwriting")
+        table = pair_table(store, "train")
+        train_writers = [w for w in store.writers if w["split"] == "train"]
+        available_chars = sorted(np.where((table >= 0).all(axis=1))[0].tolist())
+        sampler = GridBatchSampler(table, available_chars, list(range(len(train_writers))),
+                                   config.groups_per_batch, step, config.steps, config.seed)
+        loader = DataLoader(grouped, batch_sampler=sampler, num_workers=config.workers,
+                            pin_memory=device.type == "cuda", persistent_workers=config.workers > 0)
+        writer_ids = {w["id"]: i for i, w in enumerate(train_writers)}
+    elif config.groups_per_batch > 0:
         grouped = ReconstructionDataset(store, split="train", source="handwriting")
         sampler = GroupedBatchSampler(class_index(store, key=config.contrast_key),
                                       config.groups_per_batch, config.members_per_group,
                                       step, config.steps, config.seed)
         loader = DataLoader(grouped, batch_sampler=sampler, num_workers=config.workers,
-                            pin_memory=device.type == "cuda")
+                            pin_memory=device.type == "cuda", persistent_workers=config.workers > 0)
         writer_ids = {w["id"]: i for i, w in enumerate(
             [w for w in store.writers if w["split"] == "train"])}
     else:
@@ -387,12 +464,35 @@ def run(args):
             with amp(device, config.precision):
                 decoded, mu, logvar = model(images, sample=True)
                 terms = vae_loss(decoded, images, mu, logvar, beta)
-            labels = raw["class_index"]
-            if config.contrast_key == "author" and writer_ids is not None:
-                labels = torch.tensor([writer_ids[x] for x in raw["writer_id"]])
-            cos_loss, cos_positive, cos_negative = char_cosine_terms(
-                mu, labels, config.char_cos_temperature)
-            total = terms["loss"] + cos_weight * cos_loss
+            if config.contrast_key == "dual":
+                grid = config.groups_per_batch
+                split = config.content_channels
+                char_labels = torch.arange(grid).repeat_interleave(grid)
+                author_labels = torch.arange(grid).repeat(grid)
+                content_loss, content_pos, content_neg = char_cosine_terms(
+                    mu[:, :split], char_labels, config.char_cos_temperature)
+                author_loss, author_pos, author_neg = char_cosine_terms(
+                    mu[:, split:split + config.author_channels], author_labels,
+                    config.char_cos_temperature)
+                total = terms["loss"] + cos_weight * (content_loss + author_loss)
+                extra = {"char_cos_loss": content_loss.item(),
+                         "char_cos_pos": content_pos.item(), "char_cos_neg": content_neg.item(),
+                         "char_cos_gap": (content_pos - content_neg).item(),
+                         "author_cos_loss": author_loss.item(),
+                         "author_cos_pos": author_pos.item(),
+                         "author_cos_neg": author_neg.item(),
+                         "author_cos_gap": (author_pos - author_neg).item()}
+            else:
+                labels = raw["class_index"]
+                if config.contrast_key == "author" and writer_ids is not None:
+                    labels = torch.tensor([writer_ids[x] for x in raw["writer_id"]])
+                cos_loss, cos_positive, cos_negative = char_cosine_terms(
+                    mu, labels, config.char_cos_temperature)
+                total = terms["loss"] + cos_weight * cos_loss
+                extra = {"char_cos_loss": cos_loss.item(),
+                         "char_cos_pos": cos_positive.item(),
+                         "char_cos_neg": cos_negative.item(),
+                         "char_cos_gap": (cos_positive - cos_negative).item()}
             if not torch.isfinite(total):
                 raise FloatingPointError("non-finite VAE training loss; previous checkpoints preserved")
             total.backward()
@@ -401,9 +501,7 @@ def run(args):
             step = current
             record = {"step": step, **{k: v.item() for k, v in terms.items()},
                       "beta": beta, "lr": lr, "grad_norm": float(grad),
-                      "char_cos_weight": cos_weight, "char_cos_loss": cos_loss.item(),
-                      "char_cos_pos": cos_positive.item(), "char_cos_neg": cos_negative.item(),
-                      "char_cos_gap": (cos_positive - cos_negative).item(), "total_loss": total.item(),
+                      "char_cos_weight": cos_weight, **extra, "total_loss": total.item(),
                       "standard_fraction": raw["is_standard"].float().mean().item(),
                       "elapsed_seconds": time.monotonic() - started}
             validate = step % config.validate_every == 0 or step == config.steps
@@ -412,7 +510,8 @@ def run(args):
                 for source, val_loader in val_loaders.items():
                     record["val_" + source] = evaluate(model, val_loader, device, config.precision,
                         config.beta, seed=config.seed + 1000,
-                        preview_path=out / "previews" / f"{source}_{step:07d}.png")
+                        preview_path=out / "previews" / f"{source}_{step:07d}.png",
+                        writer_ids=writer_ids)
                 score = record["val_handwriting"]["mse_mean"]
                 improved = score < best
                 best = min(best, score)

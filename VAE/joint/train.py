@@ -1,4 +1,4 @@
-"""Train a decoder over the concatenated content and author codes."""
+﻿"""Train a decoder over the concatenated content and author codes."""
 from __future__ import annotations
 
 import argparse
@@ -249,7 +249,7 @@ def main():
     parser.add_argument("--author-latents", type=Path, default=None)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--merged", type=Path, default=None,
-                        help="directory from JointCode.prepare_merged; single-reader inputs")
+                        help="directory from VAE.joint.prepare_merged; single-reader inputs")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--latent-channels", type=int, default=4)
     parser.add_argument("--latent-size", type=int, default=8)

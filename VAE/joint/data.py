@@ -1,4 +1,4 @@
-"""Pairs of (content code, author code) aligned by writer and character."""
+﻿"""Pairs of (content code, author code) aligned by writer and character."""
 from __future__ import annotations
 
 import numpy as np

@@ -121,6 +121,61 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.model.decode(torch.zeros(1, 2, 3, 3))
 
 
+class DualBlockTests(unittest.TestCase):
+    def test_grid_sampler_is_a_full_grid(self):
+        from VAE.train import GridBatchSampler
+        table = np.arange(8 * 5).reshape(8, 5)          # 8 chars x 5 authors
+        sampler = GridBatchSampler(table, list(range(8)), list(range(5)), 3, 0, 2, seed=11)
+        batches = list(sampler)
+        self.assertEqual([len(b) for b in batches], [9, 9])
+        for batch in batches:
+            pairs = [divmod(int(v), 5) for v in batch]   # (char, author) from the table value
+            chars = [c for c, _ in pairs]
+            authors = [a for _, a in pairs]
+            self.assertEqual(len(set(chars)), 3)
+            self.assertEqual(len(set(authors)), 3)
+            self.assertEqual(sorted(chars.count(c) for c in set(chars)), [3, 3, 3])
+            self.assertEqual(sorted(authors.count(a) for a in set(authors)), [3, 3, 3])
+        self.assertEqual(batches, list(GridBatchSampler(table, list(range(8)), list(range(5)),
+                                                        3, 0, 2, seed=11)))
+        # Resume starts at the requested step.
+        self.assertEqual(list(GridBatchSampler(table, list(range(8)), list(range(5)),
+                                               3, 1, 2, seed=11))[0], batches[1])
+
+    def test_dual_config_rules(self):
+        from VAE.train import TrainConfig
+        base = dict(char_cos_weight=1e-3, contrast_key="dual", groups_per_batch=4,
+                    batch_size=16, content_channels=2, author_channels=1)
+        TrainConfig(**base)
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "groups_per_batch": 3})     # 3*3 != 16
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "author_channels": 0})
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "standard_ratio": 0.1})
+        with self.assertRaises(ValueError):
+            TrainConfig(**{**base, "contrast_key": "char", "groups_per_batch": 4,
+                           "members_per_group": 4})            # channel split needs dual
+
+    def test_pair_table_matches_dataset_order(self):
+        from VAE.train import pair_table
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "case"
+            fixture(root)
+            store = GlyphStore(root)
+            try:
+                table = pair_table(store, 'train')
+                self.assertEqual(table.shape[0], len(store.characters))
+                self.assertEqual(table.shape[1], 2)          # two train writers in the fixture
+                self.assertGreaterEqual(table.min(), -1)
+                # Every non-negative entry indexes a (writer, row) that exists.
+                for wi, writer in enumerate([w for w in store.writers if w['split'] == 'train']):
+                    for row, label in enumerate(writer['labels']):
+                        self.assertEqual(table[label, wi] >= 0, True)
+            finally:
+                store.close()
+
+
 class CharCosineTests(unittest.TestCase):
     def test_contrastive_loss_prefers_separation(self):
         from VAE.train import char_cosine_terms

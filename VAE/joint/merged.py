@@ -1,4 +1,4 @@
-"""Dataset over merged latent and image files (one reader per split)."""
+﻿"""Dataset over merged latent and image files (one reader per split)."""
 from __future__ import annotations
 
 import json
