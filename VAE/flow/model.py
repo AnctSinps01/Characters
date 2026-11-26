@@ -1,11 +1,11 @@
 """Rectified-flow model over blocked-VAE codes.
 
-The trunk is deliberately thin: the pooled reference channel is concatenated
-with the standard glyph's content channels and the noisy sample, and the whole
-convolution stack keeps those six channels unchanged until a final 6->3
-convolution predicts the velocity.  Time enters every block through
-adaLN-Zero, so a freshly initialised block is the identity and the pretrained
-VAE codes are not thrown away at step zero.
+Two variants share this file.  The plain one keeps the six concatenated channels
+untouched through the trunk.  The dual-stream one routes the pooled reference
+codes through their own dilated branch (1 -> style_hidden -> 1), multiplies that
+style map into the trunk pointwise, and runs the trunk at a wider channel count
+(6 -> trunk_channels -> 3).  Time enters every block through adaLN-Zero, so a
+freshly initialised block is the identity.
 """
 
 from __future__ import annotations
@@ -33,6 +33,9 @@ class FlowConfig:
     blocks: int = 6
     time_dim: int = 128
     ref_hidden: int = 16
+    trunk_channels: int = 6
+    style_hidden: int = 0
+    style_dilation: int = 2
 
     @property
     def target_channels(self) -> int:
@@ -56,11 +59,11 @@ def timestep_embedding(t: torch.Tensor, dim: int, max_period: float = 10_000.0):
 class ReferencePool(nn.Module):
     """Shared per-reference convolution followed by mean pooling over references."""
 
-    def __init__(self, hidden: int = 16):
+    def __init__(self, hidden: int = 16, dilation: int = 1):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(1, hidden, 3, padding=1), nn.GroupNorm(group_count(hidden), hidden), nn.SiLU(),
-            nn.Conv2d(hidden, 1, 3, padding=1),
+            nn.Conv2d(hidden, 1, 3, padding=dilation, dilation=dilation),
         )
 
     def forward(self, refs, counts=None):
@@ -74,6 +77,21 @@ class ReferencePool(nn.Module):
         mask = (torch.arange(count, device=refs.device)[None] < counts[:, None]).to(pooled.dtype)
         total = (pooled * mask[:, :, None, None, None]).sum(dim=1)
         return total / counts.to(pooled.dtype).view(batch, 1, 1, 1)
+
+
+class StyleBranch(nn.Module):
+    """Dilated 1 -> style_hidden -> 1 branch producing a pointwise style map."""
+
+    def __init__(self, style_hidden: int, dilation: int):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(1, style_hidden, 3, padding=dilation, dilation=dilation),
+            nn.GroupNorm(group_count(style_hidden), style_hidden), nn.SiLU(),
+            nn.Conv2d(style_hidden, 1, 3, padding=1),
+        )
+
+    def forward(self, pooled):
+        return self.layers(pooled)
 
 
 class AdaZeroBlock(nn.Module):
@@ -96,8 +114,15 @@ class FlowModel(nn.Module):
     def __init__(self, config: FlowConfig):
         super().__init__()
         self.config = config
-        channels = config.input_channels
-        self.pool = ReferencePool(config.ref_hidden)
+        channels = config.trunk_channels
+        self.pool = ReferencePool(config.ref_hidden, config.style_dilation if config.style_hidden else 1)
+        self.style = StyleBranch(config.style_hidden, config.style_dilation) if config.style_hidden else None
+        if channels == config.input_channels:
+            self.stem = nn.Identity()
+        else:
+            self.stem = nn.Sequential(
+                nn.Conv2d(config.input_channels, channels, 3, padding=1),
+                nn.GroupNorm(group_count(channels), channels), nn.SiLU())
         self.time_mlp = nn.Sequential(
             nn.Linear(config.time_dim, config.time_dim), nn.SiLU(),
             nn.Linear(config.time_dim, config.time_dim))
@@ -110,7 +135,10 @@ class FlowModel(nn.Module):
 
     def forward(self, refs, standard, x_t, t, counts=None):
         embedding = self.time_mlp(timestep_embedding(t, self.config.time_dim))
-        features = torch.cat([self.pool(refs, counts), standard, x_t], dim=1)
+        pooled = self.pool(refs, counts)
+        features = self.stem(torch.cat([pooled, standard, x_t], dim=1))
+        if self.style is not None:
+            features = features * (1 + self.style(pooled))
         for block in self.blocks:
             features = block(features, embedding)
         return self.head(F.silu(self.head_norm(features)))

@@ -31,6 +31,10 @@ class TrainConfig:
     blocks: int = 6
     time_dim: int = 128
     ref_hidden: int = 16
+    trunk_channels: int = 6
+    style_hidden: int = 0
+    style_dilation: int = 2
+    clip: float = 1.0
     ref_min: int = 1
     ref_max: int = 8
     sample_steps: int = 16
@@ -161,7 +165,8 @@ def run(args):
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else args.device)
     config = TrainConfig(**{k: getattr(args, k) for k in TrainConfig.__dataclass_fields__})
     flow_config = FlowConfig(blocks=config.blocks, time_dim=config.time_dim,
-                             ref_hidden=config.ref_hidden)
+                             ref_hidden=config.ref_hidden, trunk_channels=config.trunk_channels,
+                             style_hidden=config.style_hidden, style_dilation=config.style_dilation)
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
@@ -238,7 +243,7 @@ def train_loop(config, loader, model, ema, optimizer, val_set, stats, decoder, r
                 raise FloatingPointError("non-finite flow loss")
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), config.clip, error_if_nonfinite=True)
             optimizer.step()
             ema.update(model)
             record = {"step": step, "loss": loss.item(), "lr": lr, "grad_norm": float(grad),
