@@ -308,10 +308,12 @@ def evaluate(model, loader, device, precision, beta, *, seed, preview_path=None,
                     totals["char_pos"] += positive.item() * n
                     totals["char_neg"] += negative.item() * n
                 if writer_ids is not None:
-                    author_labels = torch.tensor([writer_ids[x] for x in raw["writer_id"]])
-                    _, author_pos, author_neg = char_cosine_terms(mu, author_labels)
-                    totals["author_pos"] += author_pos.item() * n
-                    totals["author_neg"] += author_neg.item() * n
+                    ids = [writer_ids.get(x) for x in raw["writer_id"]]
+                    if all(i is not None for i in ids):
+                        author_labels = torch.tensor(ids)
+                        _, author_pos, author_neg = char_cosine_terms(mu, author_labels)
+                        totals["author_pos"] += author_pos.item() * n
+                        totals["author_neg"] += author_neg.item() * n
                 if count == 0 and preview_path is not None:
                     preview(images, dm, decoded_sample, preview_path)
                 count += n
@@ -358,12 +360,20 @@ def run(args):
             saved_run.setdefault("latent_downsample", 8)
         expected = (asdict(mc), asdict(config), store.fingerprint)
         actual = (saved_model, saved_training, checkpoint["data_fingerprint"])
-        if actual != expected:
+        # The step budget may be raised on resume; every other setting must match.
+        def without_steps(settings):
+            return {k: v for k, v in settings.items() if k != "steps"}
+
+        if (actual[0] != expected[0] or without_steps(actual[1]) != without_steps(expected[1])
+                or actual[2] != expected[2]):
             raise ValueError("resume model/training settings or dataset differ; repeat saved CLI settings")
+        if saved_training["steps"] > config.steps:
+            raise ValueError("resume cannot lower the step budget")
         if not out.exists() or not (out / "run.json").exists():
             raise ValueError("resume requires the original run output directory")
         metadata = json.loads((out / "run.json").read_text(encoding="utf-8"))
-        if saved_run != expected[0] or metadata["training"] != expected[1] or metadata["data_fingerprint"] != expected[2]:
+        if (saved_run != expected[0] or without_steps(metadata["training"]) != without_steps(expected[1])
+                or metadata["data_fingerprint"] != expected[2]):
             raise ValueError("resume output belongs to another run")
         if checkpoint.get("device_type", device.type) != device.type:
             raise ValueError("resume must use the same device type as the checkpoint "
