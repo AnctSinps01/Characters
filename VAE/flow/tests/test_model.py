@@ -25,14 +25,26 @@ class ModelTests(unittest.TestCase):
         loss, _ = flow_loss(self.model, self.refs, self.standard, self.x_t)
         self.assertEqual(loss.dim(), 0)
 
-    def test_zero_init_blocks_are_identity(self):
-        """Every block and the head start as no-ops, so the initial velocity is zero."""
+    def test_initial_output_is_zero(self):
+        """Zero-initialised modulation keeps every block the identity and the head zero."""
         out = self.model(self.refs, self.standard, self.x_t, self.t)
         self.assertLess(out.abs().max().item(), 1e-6)
-        with torch.no_grad():
-            for parameter in self.model.parameters():
-                parameter.add_(0.01)
-        self.assertGreater(self.model(self.refs, self.standard, self.x_t, self.t).abs().max().item(), 1e-4)
+
+    def test_blocks_receive_gradient(self):
+        """Regression: zero-initialising the convs as well left all blocks dead."""
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
+        for _ in range(3):
+            self.model.zero_grad()
+            loss, _ = flow_loss(self.model, self.refs, self.standard, self.x_t)
+            loss.backward()
+            optimizer.step()
+        self.model.zero_grad()
+        loss, _ = flow_loss(self.model, self.refs, self.standard, self.x_t)
+        loss.backward()
+        modulation_grad = self.model.blocks[0].modulation.weight.grad
+        self.assertIsNotNone(modulation_grad)
+        self.assertGreater(modulation_grad.abs().sum().item(), 0,
+                           "gate modulation must see gradient or the block never trains")
 
     def test_reference_count_is_arbitrary(self):
         for count in (1, 3, 9):

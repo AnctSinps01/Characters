@@ -42,6 +42,7 @@ class LatentSet:
 
     def __init__(self, root, split, stats=None):
         root = Path(root)
+        self.root = root
         self.latent = np.load(root / f"{split}_latent.npy", mmap_mode="r")
         self.label = np.load(root / f"{split}_label.npy", mmap_mode="r")
         self.owner = np.load(root / f"{split}_owner.npy", mmap_mode="r")
@@ -57,13 +58,26 @@ class LatentSet:
     def codes(self, rows):
         return torch.from_numpy(np.asarray(self.latent[rows], np.float32))
 
+    def condition_source(self, condition="standard"):
+        if condition == "standard":
+            return self.standards
+        if condition == "centroid":
+            return np.load(self.root / "centroid_latent.npy", mmap_mode="r")
+        raise ValueError("condition must be standard or centroid")
+
 
 class FlowDataset(Dataset):
-    def __init__(self, data: LatentSet, ref_min=1, ref_max=8, seed=0):
+    def __init__(self, data: LatentSet, ref_min=1, ref_max=8, seed=0, condition="standard"):
         self.data = data
         self.ref_min = ref_min
         self.ref_max = ref_max
         self.seed = seed
+        self.condition = condition
+        self.centroids = None
+        if condition == "centroid":
+            self.centroids = np.load(Path(data.root) / "centroid_latent.npy", mmap_mode="r")
+        elif condition != "standard":
+            raise ValueError("condition must be standard or centroid")
 
     def __len__(self):
         return len(self.data)
@@ -73,7 +87,8 @@ class FlowDataset(Dataset):
         owner = int(data.owner[index])
         character = int(data.label[index])
         target = torch.from_numpy(np.asarray(data.latent[index], np.float32))
-        standard = torch.from_numpy(np.asarray(data.standards[character], np.float32))
+        source = self.centroids if self.centroids is not None else data.standards
+        standard = torch.from_numpy(np.asarray(source[character], np.float32))
         rows = data.rows[owner]
         count = int(torch.randint(self.ref_min, self.ref_max + 1, ()).item())
         choices = rows[np.random.randint(0, len(rows), size=count * 3)]
@@ -81,7 +96,7 @@ class FlowDataset(Dataset):
         if len(choices) == 0:
             choices = rows[:1]
         refs = torch.from_numpy(np.asarray(data.latent[choices], np.float32))
-        return {"standard": standard[:2], "target": target[:3], "refs": refs[:, 2:3],
+        return {"standard": standard, "target": target[:3], "refs": refs[:, 2:3],
                 "character": character, "owner": owner}
 
 

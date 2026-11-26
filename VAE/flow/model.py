@@ -36,6 +36,9 @@ class FlowConfig:
     trunk_channels: int = 6
     style_hidden: int = 0
     style_dilation: int = 2
+    content_hidden: int = 0
+    branch_channels: int = 0
+    star: bool = False
 
     @property
     def target_channels(self) -> int:
@@ -95,29 +98,91 @@ class StyleBranch(nn.Module):
 
 
 class AdaZeroBlock(nn.Module):
-    """adaLN-Zero residual block that keeps the channel count unchanged."""
+    """adaLN-Zero residual block that keeps the channel count unchanged.
+
+    Only the modulation is zero-initialised: the gate then starts at zero so the
+    block is the identity, while ``dL/d(gate) = dL/d(out) * block_out`` stays
+    non-zero because the convolution keeps its default init.  Zero-initialising
+    the convolution as well would multiply every gradient by the zero gate and
+    leave the block untrained forever.
+    """
 
     def __init__(self, channels: int, time_dim: int):
         super().__init__()
         self.norm = nn.GroupNorm(group_count(channels), channels)
         self.conv = nn.Conv2d(channels, channels, 3, padding=1)
         self.modulation = nn.Linear(time_dim, channels * 3)
-        nn.init.zeros_(self.conv.weight)
-        nn.init.zeros_(self.conv.bias)
+        nn.init.zeros_(self.modulation.weight)
+        nn.init.zeros_(self.modulation.bias)
 
     def forward(self, x, embedding):
         scale, shift, gate = self.modulation(embedding)[:, :, None, None].chunk(3, dim=1)
         return x + gate * (self.norm(self.conv(self.norm(x))) * (1 + scale) + shift)
 
 
+class StarBlock(nn.Module):
+    """StarNet-style block: two activated convolutions multiplied, then projected.
+
+    Three convolutions per block instead of one, so the trunk carries roughly
+    three times the convolution parameters of a plain residual stack.
+    """
+
+    def __init__(self, channels: int, time_dim: int):
+        super().__init__()
+        self.norm = nn.GroupNorm(group_count(channels), channels)
+        self.branch_a = nn.Conv2d(channels, channels, 3, padding=1)
+        self.branch_b = nn.Conv2d(channels, channels, 3, padding=1)
+        self.project_norm = nn.GroupNorm(group_count(channels), channels)
+        self.project = nn.Conv2d(channels, channels, 3, padding=1)
+        self.modulation = nn.Linear(time_dim, channels * 3)
+        nn.init.zeros_(self.modulation.weight)
+        nn.init.zeros_(self.modulation.bias)
+
+    def forward(self, x, embedding):
+        scale, shift, gate = self.modulation(embedding)[:, :, None, None].chunk(3, dim=1)
+        hidden = self.norm(x)
+        mixed = F.silu(self.branch_a(hidden)) * F.silu(self.branch_b(hidden))
+        projected = self.project(F.silu(self.project_norm(mixed)))
+        return x + gate * (projected * (1 + scale) + shift)
+
+
 class FlowModel(nn.Module):
     def __init__(self, config: FlowConfig):
         super().__init__()
         self.config = config
-        channels = config.trunk_channels
+        channels = config.branch_channels or config.trunk_channels
         self.pool = ReferencePool(config.ref_hidden, config.style_dilation if config.style_hidden else 1)
-        self.style = StyleBranch(config.style_hidden, config.style_dilation) if config.style_hidden else None
-        if channels == config.input_channels:
+        self.branches = None
+        if config.branch_channels:
+            # Two equally wide streams multiplied pointwise: content x style.
+            self.branches = nn.ModuleDict({
+                "content": nn.Sequential(
+                    nn.Conv2d(4 + config.target_channels, config.branch_channels, 3, padding=1),
+                    nn.GroupNorm(group_count(config.branch_channels), config.branch_channels), nn.SiLU()),
+                "style": nn.Sequential(
+                    nn.Conv2d(1, config.branch_channels, 3, padding=1),
+                    nn.GroupNorm(group_count(config.branch_channels), config.branch_channels), nn.SiLU()),
+            })
+        # Style stream: pooled reference codes -> style_hidden channels.
+        self.style = None
+        if config.style_hidden and not config.branch_channels:
+            self.style = nn.Sequential(
+                nn.Conv2d(1, config.style_hidden, 3, padding=1),
+                nn.GroupNorm(group_count(config.style_hidden), config.style_hidden), nn.SiLU())
+        # Content stream: standard glyph codes concatenated with the noisy sample.
+        self.content = None
+        if config.content_hidden:
+            self.content = nn.Sequential(
+                nn.Conv2d(4 + config.target_channels, config.content_hidden, 3, padding=1),
+                nn.GroupNorm(group_count(config.content_hidden), config.content_hidden), nn.SiLU())
+        if config.content_hidden:
+            stem_in = config.content_hidden + config.style_hidden
+            self.stem = nn.Sequential(
+                nn.Conv2d(stem_in, channels, 3, padding=1),
+                nn.GroupNorm(group_count(channels), channels), nn.SiLU())
+            if stem_in == channels:
+                self.stem = nn.Identity()
+        elif channels == config.input_channels:
             self.stem = nn.Identity()
         else:
             self.stem = nn.Sequential(
@@ -126,7 +191,8 @@ class FlowModel(nn.Module):
         self.time_mlp = nn.Sequential(
             nn.Linear(config.time_dim, config.time_dim), nn.SiLU(),
             nn.Linear(config.time_dim, config.time_dim))
-        self.blocks = nn.ModuleList([AdaZeroBlock(channels, config.time_dim)
+        block_class = StarBlock if config.star else AdaZeroBlock
+        self.blocks = nn.ModuleList([block_class(channels, config.time_dim)
                                      for _ in range(config.blocks)])
         self.head_norm = nn.GroupNorm(group_count(channels), channels)
         self.head = nn.Conv2d(channels, config.target_channels, 3, padding=1)
@@ -136,9 +202,24 @@ class FlowModel(nn.Module):
     def forward(self, refs, standard, x_t, t, counts=None):
         embedding = self.time_mlp(timestep_embedding(t, self.config.time_dim))
         pooled = self.pool(refs, counts)
-        features = self.stem(torch.cat([pooled, standard, x_t], dim=1))
-        if self.style is not None:
-            features = features * (1 + self.style(pooled))
+        if self.branches is not None:
+            standard = torch.cat([standard, refs.new_zeros(standard.shape[0], 4 - standard.shape[1],
+                                                           *standard.shape[2:])], dim=1) \
+                if standard.shape[1] < 4 else standard[:, :4]
+            features = self.branches["content"](torch.cat([standard, x_t], dim=1)) \
+                * self.branches["style"](pooled)
+        elif self.content is not None:
+            standard = torch.cat([standard, refs.new_zeros(standard.shape[0], 4 - standard.shape[1],
+                                                           *standard.shape[2:])], dim=1) \
+                if standard.shape[1] < 4 else standard[:, :4]
+            features = torch.cat([self.content(torch.cat([standard, x_t], dim=1)),
+                                  self.style(pooled)], dim=1)
+            features = self.stem(features)
+        else:
+            content = standard[:, :self.config.content_channels]
+            features = self.stem(torch.cat([pooled, content, x_t], dim=1))
+            if self.style is not None:
+                features = features * (1 + self.style(pooled))
         for block in self.blocks:
             features = block(features, embedding)
         return self.head(F.silu(self.head_norm(features)))

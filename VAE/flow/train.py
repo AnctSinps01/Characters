@@ -34,6 +34,9 @@ class TrainConfig:
     trunk_channels: int = 6
     style_hidden: int = 0
     style_dilation: int = 2
+    content_hidden: int = 0
+    branch_channels: int = 0
+    star: bool = False
     clip: float = 1.0
     ref_min: int = 1
     ref_max: int = 8
@@ -45,6 +48,7 @@ class TrainConfig:
     precision: str = "bf16"
     seed: int = 0
     device: str = "cuda"
+    condition: str = "standard"
 
 
 class EMA:
@@ -70,7 +74,7 @@ def learning_rate(step, config):
 
 def normalize(batch, stats, device):
     mean, std = stats.mean.to(device), stats.std.to(device)
-    return (batch["standard"].to(device) - mean[:2].view(1, 2, 1, 1)) / std[:2].view(1, 2, 1, 1), \
+    return (batch["standard"].to(device) - mean[:4].view(1, 4, 1, 1)) / std[:4].view(1, 4, 1, 1), \
            (batch["target"].to(device) - mean[:3].view(1, 3, 1, 1)) / std[:3].view(1, 3, 1, 1), \
            (batch["refs"].to(device) - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
 
@@ -112,8 +116,9 @@ def validate(model, ema, latents, stats, decoder, rows, images, used, store, dev
     model.eval()
     rng = np.random.default_rng(seed)
     writer_list = [w for w in store.writers if w["split"] == "val"]
-    standard = torch.from_numpy(np.asarray(latents.standards[[int(latents.label[r]) for r in rows]],
-                                           np.float32))[:, :2].to(device)
+    source = latents.condition_source(config.condition)
+    standard = torch.from_numpy(np.asarray(source[[int(latents.label[r]) for r in rows]],
+                                           np.float32))[:, :4].to(device)
     target = torch.from_numpy(np.asarray(latents.latent[rows], np.float32))[:, :3].to(device)
     refs, counts = [], []
     for row, owner, absolute in used:
@@ -129,7 +134,7 @@ def validate(model, ema, latents, stats, decoder, rows, images, used, store, dev
     counts = torch.tensor(counts, device=device)
     mean, std = stats.mean.to(device), stats.std.to(device)
     padded = padded.to(device)
-    std_in = (standard - mean[:2].view(1, 2, 1, 1)) / std[:2].view(1, 2, 1, 1)
+    std_in = (standard - mean[:4].view(1, 4, 1, 1)) / std[:4].view(1, 4, 1, 1)
     refs_in = (padded - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
     generated = sample(model, refs_in, std_in, steps=config.sample_steps, counts=counts)
     denormalized = generated * std[:3].to(device).view(1, 3, 1, 1) + mean[:3].to(device).view(1, 3, 1, 1)
@@ -166,7 +171,9 @@ def run(args):
     config = TrainConfig(**{k: getattr(args, k) for k in TrainConfig.__dataclass_fields__})
     flow_config = FlowConfig(blocks=config.blocks, time_dim=config.time_dim,
                              ref_hidden=config.ref_hidden, trunk_channels=config.trunk_channels,
-                             style_hidden=config.style_hidden, style_dilation=config.style_dilation)
+                             style_hidden=config.style_hidden, style_dilation=config.style_dilation,
+                             content_hidden=config.content_hidden,
+                             branch_channels=config.branch_channels, star=config.star)
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
@@ -181,7 +188,7 @@ def run(args):
     store = GlyphStore(args.data)
     train_set = LatentSet(args.latents, "train")
     stats = LatentStats.from_latent(train_set.latent)
-    dataset = FlowDataset(train_set, config.ref_min, config.ref_max, config.seed)
+    dataset = FlowDataset(train_set, config.ref_min, config.ref_max, config.seed, config.condition)
     loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True,
                         num_workers=config.workers, collate_fn=collate, drop_last=True,
                         persistent_workers=config.workers > 0)
@@ -198,7 +205,7 @@ def run(args):
     (out / "run.json").write_text(json.dumps({
         "flow_config": asdict(flow_config), "train_config": asdict(config),
         "vae": str(Path(args.vae).resolve()), "latents": str(Path(args.latents).resolve()),
-        "latent_stats": stats.to_dict(),
+        "latent_stats": stats.to_dict(), "condition": config.condition,
     }, indent=2), encoding="utf-8")
 
     started = time.monotonic()
@@ -274,8 +281,11 @@ def main():
     parser.add_argument("--vae", required=True)
     parser.add_argument("--output", required=True)
     for field in TrainConfig.__dataclass_fields__.values():
+        if field.name == "star":
+            continue
         parser.add_argument(f"--{field.name.replace('_', '-')}", type=type(field.default),
                             default=field.default)
+    parser.add_argument("--star", action="store_true", help="use three-convolution Star blocks")
     run(parser.parse_args())
 
 
