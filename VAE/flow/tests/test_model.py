@@ -10,7 +10,7 @@ from VAE.flow.model import FlowConfig, FlowModel, flow_loss, sample, timestep_em
 class ModelTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
-        self.config = FlowConfig(latent_size=8, hidden=32, blocks=2, time_dim=32, ref_hidden=8)
+        self.config = FlowConfig(latent_size=8, blocks=2, time_dim=32, ref_hidden=8)
         self.model = FlowModel(self.config)
         self.refs = torch.randn(3, 4, 1, 8, 8)
         self.standard = torch.randn(3, 2, 8, 8)
@@ -59,9 +59,13 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(embedding).all())
         self.assertGreater((embedding[0] - embedding[1]).abs().max().item(), 1e-3)
 
-    def test_group_norm_needs_divisible_hidden(self):
-        with self.assertRaises(ValueError):
-            FlowModel(FlowConfig(hidden=30, blocks=1))
+    def test_trunk_keeps_six_channels(self):
+        model = FlowModel(FlowConfig(blocks=3))
+        for block in model.blocks:
+            self.assertEqual(block.conv.in_channels, 6)
+            self.assertEqual(block.conv.out_channels, 6)
+        self.assertEqual(model.head.in_channels, 6)
+        self.assertEqual(model.head.out_channels, 3)
 
 
 if __name__ == "__main__":

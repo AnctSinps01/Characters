@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 import json
 import math
 import os
+import signal
 from pathlib import Path
 import time
 
@@ -28,7 +29,6 @@ class TrainConfig:
     warmup: int = 2_000
     ema_decay: float = 0.999
     blocks: int = 6
-    hidden: int = 96
     time_dim: int = 128
     ref_hidden: int = 16
     ref_min: int = 1
@@ -160,8 +160,8 @@ def save(path, model, config, flow_config, step, score):
 def run(args):
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else args.device)
     config = TrainConfig(**{k: getattr(args, k) for k in TrainConfig.__dataclass_fields__})
-    flow_config = FlowConfig(blocks=config.blocks, hidden=config.hidden,
-                             time_dim=config.time_dim, ref_hidden=config.ref_hidden)
+    flow_config = FlowConfig(blocks=config.blocks, time_dim=config.time_dim,
+                             ref_hidden=config.ref_hidden)
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
@@ -200,6 +200,30 @@ def run(args):
     best = math.inf
     use_amp = config.precision == "bf16" and device.type == "cuda"
     step = 0
+    previous = {}
+
+    def stop(signum, _frame):
+        raise KeyboardInterrupt
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, stop)
+    try:
+        step, best = train_loop(config, loader, model, ema, optimizer, val_set, stats, decoder,
+                                rows, images, used, store, device, out, started, best, use_amp,
+                                flow_config)
+    except KeyboardInterrupt:
+        save(out / "last.pt", model, config, flow_config, step, best)
+        print(f"interrupted at step {step}; saved {out / 'last.pt'}", flush=True)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    store.close()
+    print(f"finished: {out}")
+
+
+def train_loop(config, loader, model, ema, optimizer, val_set, stats, decoder, rows, images, used,
+               store, device, out, started, best, use_amp, flow_config):
+    step = 0
     while step < config.steps:
         for batch in loader:
             step += 1
@@ -235,8 +259,7 @@ def run(args):
                                   for k, v in record.items()}), flush=True)
             if step >= config.steps:
                 break
-    store.close()
-    print(f"finished: {out}")
+    return step, best
 
 
 def main():

@@ -1,8 +1,9 @@
 """Rectified-flow model over blocked-VAE codes.
 
-The trunk only ever sees six channels: one pooled channel summarising the
-reference author codes, the standard glyph's two content channels and the three
-channels of the current noisy sample.  Time enters every block through
+The trunk is deliberately thin: the pooled reference channel is concatenated
+with the standard glyph's content channels and the noisy sample, and the whole
+convolution stack keeps those six channels unchanged until a final 6->3
+convolution predicts the velocity.  Time enters every block through
 adaLN-Zero, so a freshly initialised block is the identity and the pretrained
 VAE codes are not thrown away at step zero.
 """
@@ -17,12 +18,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def group_count(channels: int) -> int:
+    for groups in (32, 16, 8, 4, 3, 2):
+        if channels % groups == 0:
+            return groups
+    return 1
+
+
 @dataclass
 class FlowConfig:
     latent_size: int = 8
     content_channels: int = 2
     author_channels: int = 1
-    hidden: int = 96
     blocks: int = 6
     time_dim: int = 128
     ref_hidden: int = 16
@@ -49,10 +56,10 @@ def timestep_embedding(t: torch.Tensor, dim: int, max_period: float = 10_000.0):
 class ReferencePool(nn.Module):
     """Shared per-reference convolution followed by mean pooling over references."""
 
-    def __init__(self, hidden: int):
+    def __init__(self, hidden: int = 16):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Conv2d(1, hidden, 3, padding=1), nn.GroupNorm(8, hidden), nn.SiLU(),
+            nn.Conv2d(1, hidden, 3, padding=1), nn.GroupNorm(group_count(hidden), hidden), nn.SiLU(),
             nn.Conv2d(hidden, 1, 3, padding=1),
         )
 
@@ -70,13 +77,13 @@ class ReferencePool(nn.Module):
 
 
 class AdaZeroBlock(nn.Module):
-    """adaln-Zero residual block: zero-initialised gate keeps the block as identity."""
+    """adaLN-Zero residual block that keeps the channel count unchanged."""
 
-    def __init__(self, hidden: int, time_dim: int):
+    def __init__(self, channels: int, time_dim: int):
         super().__init__()
-        self.norm = nn.GroupNorm(32, hidden)
-        self.conv = nn.Conv2d(hidden, hidden, 3, padding=1)
-        self.modulation = nn.Linear(time_dim, hidden * 3)
+        self.norm = nn.GroupNorm(group_count(channels), channels)
+        self.conv = nn.Conv2d(channels, channels, 3, padding=1)
+        self.modulation = nn.Linear(time_dim, channels * 3)
         nn.init.zeros_(self.conv.weight)
         nn.init.zeros_(self.conv.bias)
 
@@ -89,22 +96,21 @@ class FlowModel(nn.Module):
     def __init__(self, config: FlowConfig):
         super().__init__()
         self.config = config
-        hidden = config.hidden
+        channels = config.input_channels
         self.pool = ReferencePool(config.ref_hidden)
         self.time_mlp = nn.Sequential(
-            nn.Linear(config.time_dim, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
-        self.stem = nn.Conv2d(config.input_channels, hidden, 3, padding=1)
-        self.stem_norm = nn.GroupNorm(32, hidden)
-        self.blocks = nn.ModuleList([AdaZeroBlock(hidden, hidden) for _ in range(config.blocks)])
-        self.head_norm = nn.GroupNorm(32, hidden)
-        self.head = nn.Conv2d(hidden, config.target_channels, 3, padding=1)
+            nn.Linear(config.time_dim, config.time_dim), nn.SiLU(),
+            nn.Linear(config.time_dim, config.time_dim))
+        self.blocks = nn.ModuleList([AdaZeroBlock(channels, config.time_dim)
+                                     for _ in range(config.blocks)])
+        self.head_norm = nn.GroupNorm(group_count(channels), channels)
+        self.head = nn.Conv2d(channels, config.target_channels, 3, padding=1)
         nn.init.zeros_(self.head.weight)
         nn.init.zeros_(self.head.bias)
 
     def forward(self, refs, standard, x_t, t, counts=None):
         embedding = self.time_mlp(timestep_embedding(t, self.config.time_dim))
-        features = self.stem(torch.cat([self.pool(refs, counts), standard, x_t], dim=1))
-        features = F.silu(self.stem_norm(features))
+        features = torch.cat([self.pool(refs, counts), standard, x_t], dim=1)
         for block in self.blocks:
             features = block(features, embedding)
         return self.head(F.silu(self.head_norm(features)))
