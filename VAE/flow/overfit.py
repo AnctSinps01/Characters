@@ -30,6 +30,9 @@ def main():
     parser.add_argument("--condition", default="standard")
     parser.add_argument("--arch", default="conv")
     parser.add_argument("--depth", type=int, default=24)
+    parser.add_argument("--refs", type=int, default=4)
+    parser.add_argument("--resample-refs", action="store_true",
+                        help="draw fresh references every step so they cannot be memorised")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -50,20 +53,30 @@ def main():
     else:
         target = target[:, :3]
         standard = standard[:, :2]
-    refs, counts = [], []
-    for row in rows:
-        owner = int(train.owner[row])
-        pool = train.rows[owner]
-        others = pool[np.asarray(train.label[pool]) != int(train.label[row])]
-        take = others[rng.choice(len(others), size=min(4, len(others)), replace=False)]
-        refs.append(torch.from_numpy(np.asarray(train.latent[take], np.float32))[:, 2:3])
-        counts.append(len(take))
-    widest = max(counts)
-    padded = torch.zeros(len(refs), widest, 1, 8, 8)
-    for index, item in enumerate(refs):
-        padded[index, :len(item)] = item
-    counts = torch.tensor(counts, device=device)
-    refs = (padded.to(device) - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
+    label_all = np.asarray(train.label)
+    owner_all = np.asarray(train.owner)
+    rows_label = label_all[rows]
+    rows_owner = owner_all[rows]
+
+    def make_refs(batch_rows, reference_count, gen):
+        """Sample references for a batch; refreshed every step so they cannot be memorised."""
+        refs, counts = [], []
+        for row in batch_rows:
+            pool = train.rows[int(owner_all[row])]
+            others = pool[label_all[pool] != int(label_all[row])]
+            take = others[gen.choice(len(others), size=min(reference_count, len(others)), replace=False)]
+            refs.append(torch.from_numpy(np.asarray(train.latent[take], np.float32))[:, 2:3])
+            counts.append(len(take))
+        widest = max(counts)
+        padded = torch.zeros(len(refs), widest, 1, 8, 8)
+        for index, item in enumerate(refs):
+            padded[index, :len(item)] = item
+        counts_t = torch.tensor(counts, device=device)
+        refs_t = (padded.to(device) - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
+        return refs_t, counts_t
+
+    ref_gen = np.random.default_rng(1234)
+    refs, counts = make_refs(rows, args.refs, ref_gen)
     n_standard = standard.shape[1]
     n_target = target.shape[1]
     standard = (standard - mean[:n_standard].view(1, n_standard, 1, 1)) / std[:n_standard].view(1, n_standard, 1, 1)
@@ -83,8 +96,12 @@ def main():
 
     total = len(rows)
     for step in range(1, args.steps + 1):
-        index = torch.randint(total, (min(args.batch_size, total),))
-        loss, _ = loss_fn(model, refs[index], standard[index], normalized[index], counts[index])
+        picked = torch.randint(total, (min(args.batch_size, total),)).numpy()
+        if args.resample_refs:
+            step_refs, step_counts = make_refs(rows[picked], args.refs, ref_gen)
+        else:
+            step_refs, step_counts = refs[picked], counts[picked]
+        loss, _ = loss_fn(model, step_refs, standard[picked], normalized[picked], step_counts)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -93,7 +110,8 @@ def main():
         if step % 500 == 0 or step == args.steps:
             with torch.no_grad():
                 model.eval()
-                generated = sampler(model, refs, standard, steps=16, counts=counts)
+                eval_refs, eval_counts = make_refs(rows, args.refs, ref_gen)
+                generated = sampler(model, eval_refs, standard, steps=16, counts=eval_counts)
                 mse = (generated - normalized).square().mean().item()
                 model.train()
             print(json.dumps({"step": step, "loss": round(loss.item(), 5),

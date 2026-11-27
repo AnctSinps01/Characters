@@ -50,6 +50,7 @@ class LatentSet:
         self.owner = np.load(root / f"{split}_owner.npy", mmap_mode=mode)
         info = json.loads((root / f"{split}_writers.json").read_text(encoding="utf-8"))
         self.characters = info["characters"]
+        self.ranges = info["ranges"]
         self.rows = [np.arange(r["start"], r["start"] + r["length"]) for r in info["ranges"]]
         self.standards = np.load(root / "standards_latent.npy", mmap_mode=mode)
         self.stats = stats
