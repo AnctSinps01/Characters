@@ -14,6 +14,9 @@ import torch
 
 from VAE.flow.data import LatentSet, LatentStats
 from VAE.flow.model import FlowConfig, FlowModel, flow_loss, sample
+from VAE.flow.dit import DiTConfig, DiTFlow
+from VAE.flow.dit import flow_loss as dit_flow_loss
+from VAE.flow.dit import sample as dit_sample
 
 
 def main():
@@ -25,6 +28,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--condition", default="standard")
+    parser.add_argument("--arch", default="conv")
+    parser.add_argument("--depth", type=int, default=24)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -37,8 +42,14 @@ def main():
     rng = np.random.default_rng(0)
     rows = rng.choice(len(train), args.samples, replace=False)
     source = train.condition_source(args.condition)
-    target = torch.from_numpy(np.asarray(train.latent[rows], np.float32))[:, :3].to(device)
-    standard = torch.from_numpy(np.asarray(source[np.asarray(train.label[rows])], np.float32))[:, :2].to(device)
+    target = torch.from_numpy(np.asarray(train.latent[rows], np.float32)).to(device)
+    standard = torch.from_numpy(np.asarray(source[np.asarray(train.label[rows])], np.float32)).to(device)
+    if args.arch == "dit":
+        target = target[:, :4]
+        standard = standard[:, :4]
+    else:
+        target = target[:, :3]
+        standard = standard[:, :2]
     refs, counts = [], []
     for row in rows:
         owner = int(train.owner[row])
@@ -53,11 +64,19 @@ def main():
         padded[index, :len(item)] = item
     counts = torch.tensor(counts, device=device)
     refs = (padded.to(device) - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
-    standard = (standard - mean[:2].view(1, 2, 1, 1)) / std[:2].view(1, 2, 1, 1)
-    normalized = (target - mean[:3].view(1, 3, 1, 1)) / std[:3].view(1, 3, 1, 1)
+    n_standard = standard.shape[1]
+    n_target = target.shape[1]
+    standard = (standard - mean[:n_standard].view(1, n_standard, 1, 1)) / std[:n_standard].view(1, n_standard, 1, 1)
+    normalized = (target - mean[:n_target].view(1, n_target, 1, 1)) / std[:n_target].view(1, n_target, 1, 1)
 
-    config = FlowConfig(blocks=6, trunk_channels=24, style_hidden=4, style_dilation=2)
-    model = FlowModel(config).to(device)
+    if args.arch == "dit":
+        config = DiTConfig(depth=args.depth)
+        model = DiTFlow(config).to(device)
+        loss_fn, sampler = dit_flow_loss, dit_sample
+    else:
+        config = FlowConfig(blocks=6, trunk_channels=24, style_hidden=4, style_dilation=2)
+        model = FlowModel(config).to(device)
+        loss_fn, sampler = flow_loss, sample
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps)
     print(f"params {sum(p.numel() for p in model.parameters())} samples {args.samples}", flush=True)
@@ -65,7 +84,7 @@ def main():
     total = len(rows)
     for step in range(1, args.steps + 1):
         index = torch.randint(total, (min(args.batch_size, total),))
-        loss, _ = flow_loss(model, refs[index], standard[index], normalized[index], counts[index])
+        loss, _ = loss_fn(model, refs[index], standard[index], normalized[index], counts[index])
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -74,7 +93,7 @@ def main():
         if step % 500 == 0 or step == args.steps:
             with torch.no_grad():
                 model.eval()
-                generated = sample(model, refs, standard, steps=16, counts=counts)
+                generated = sampler(model, refs, standard, steps=16, counts=counts)
                 mse = (generated - normalized).square().mean().item()
                 model.train()
             print(json.dumps({"step": step, "loss": round(loss.item(), 5),
