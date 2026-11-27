@@ -39,10 +39,11 @@ class FlowConfig:
     content_hidden: int = 0
     branch_channels: int = 0
     star: bool = False
+    predict_free: bool = False
 
     @property
     def target_channels(self) -> int:
-        return self.content_channels + self.author_channels
+        return self.content_channels + self.author_channels + (1 if self.predict_free else 0)
 
     @property
     def input_channels(self) -> int:

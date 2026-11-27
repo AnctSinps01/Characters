@@ -40,16 +40,18 @@ class LatentStats:
 class LatentSet:
     """Memory-mapped codes for one split, with per-writer row indexes."""
 
-    def __init__(self, root, split, stats=None):
+    def __init__(self, root, split, stats=None, in_memory=False):
         root = Path(root)
         self.root = root
-        self.latent = np.load(root / f"{split}_latent.npy", mmap_mode="r")
-        self.label = np.load(root / f"{split}_label.npy", mmap_mode="r")
-        self.owner = np.load(root / f"{split}_owner.npy", mmap_mode="r")
+        self.mode = None if in_memory else "r"
+        mode = self.mode
+        self.latent = np.load(root / f"{split}_latent.npy", mmap_mode=mode)
+        self.label = np.load(root / f"{split}_label.npy", mmap_mode=mode)
+        self.owner = np.load(root / f"{split}_owner.npy", mmap_mode=mode)
         info = json.loads((root / f"{split}_writers.json").read_text(encoding="utf-8"))
         self.characters = info["characters"]
         self.rows = [np.arange(r["start"], r["start"] + r["length"]) for r in info["ranges"]]
-        self.standards = np.load(root / "standards_latent.npy", mmap_mode="r")
+        self.standards = np.load(root / "standards_latent.npy", mmap_mode=mode)
         self.stats = stats
 
     def __len__(self):
@@ -62,7 +64,7 @@ class LatentSet:
         if condition == "standard":
             return self.standards
         if condition == "centroid":
-            return np.load(self.root / "centroid_latent.npy", mmap_mode="r")
+            return np.load(self.root / "centroid_latent.npy", mmap_mode=self.mode)
         raise ValueError("condition must be standard or centroid")
 
 
@@ -96,7 +98,7 @@ class FlowDataset(Dataset):
         if len(choices) == 0:
             choices = rows[:1]
         refs = torch.from_numpy(np.asarray(data.latent[choices], np.float32))
-        return {"standard": standard, "target": target[:3], "refs": refs[:, 2:3],
+        return {"standard": standard, "target": target, "refs": refs[:, 2:3],
                 "character": character, "owner": owner}
 
 

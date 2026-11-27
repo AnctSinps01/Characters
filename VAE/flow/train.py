@@ -17,6 +17,12 @@ from torch.utils.data import DataLoader
 
 from VAE.data import GlyphStore
 from VAE.flow.data import FlowDataset, LatentSet, LatentStats, collate
+from VAE.flow.dit import DiTConfig, DiTFlow
+from VAE.flow.dit import flow_loss as dit_flow_loss
+from VAE.flow.dit import sample as dit_sample
+from VAE.flow.dit import DiTConfig, DiTFlow
+from VAE.flow.dit import flow_loss as dit_flow_loss
+from VAE.flow.dit import sample as dit_sample
 from VAE.flow.model import FlowConfig, FlowModel, flow_loss, sample
 from VAE.model import GlyphVAE, VAEConfig
 
@@ -37,6 +43,13 @@ class TrainConfig:
     content_hidden: int = 0
     branch_channels: int = 0
     star: bool = False
+    predict_free: bool = False
+    arch: str = "conv"
+    depth: int = 24
+    d_model: int = 128
+    heads: int = 8
+    ffn: int = 512
+    in_memory: bool = False
     clip: float = 1.0
     ref_min: int = 1
     ref_max: int = 8
@@ -72,10 +85,11 @@ def learning_rate(step, config):
     return config.lr * 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
 
 
-def normalize(batch, stats, device):
+def normalize(batch, stats, device, channels=3):
     mean, std = stats.mean.to(device), stats.std.to(device)
     return (batch["standard"].to(device) - mean[:4].view(1, 4, 1, 1)) / std[:4].view(1, 4, 1, 1), \
-           (batch["target"].to(device) - mean[:3].view(1, 3, 1, 1)) / std[:3].view(1, 3, 1, 1), \
+           (batch["target"].to(device)[:, :channels] - mean[:channels].view(1, channels, 1, 1)) \
+           / std[:channels].view(1, channels, 1, 1), \
            (batch["refs"].to(device) - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
 
 
@@ -110,7 +124,7 @@ def write_preview(real, generated, oracle, path):
 
 @torch.no_grad()
 def validate(model, ema, latents, stats, decoder, rows, images, used, store, device, config,
-             seed=0, preview=None):
+             seed=0, preview=None, sampler=sample):
     live = {k: v.detach().clone() for k, v in model.state_dict().items()}
     model.load_state_dict({k: v.detach().clone() for k, v in ema.shadow.items()})
     model.eval()
@@ -119,7 +133,8 @@ def validate(model, ema, latents, stats, decoder, rows, images, used, store, dev
     source = latents.condition_source(config.condition)
     standard = torch.from_numpy(np.asarray(source[[int(latents.label[r]) for r in rows]],
                                            np.float32))[:, :4].to(device)
-    target = torch.from_numpy(np.asarray(latents.latent[rows], np.float32))[:, :3].to(device)
+    target = torch.from_numpy(np.asarray(latents.latent[rows], np.float32))[
+        :, :model.config.target_channels].to(device)
     refs, counts = [], []
     for row, owner, absolute in used:
         pool = latents.rows[owner]
@@ -136,10 +151,15 @@ def validate(model, ema, latents, stats, decoder, rows, images, used, store, dev
     padded = padded.to(device)
     std_in = (standard - mean[:4].view(1, 4, 1, 1)) / std[:4].view(1, 4, 1, 1)
     refs_in = (padded - mean[2:3].view(1, 1, 1, 1)) / std[2:3].view(1, 1, 1, 1)
-    generated = sample(model, refs_in, std_in, steps=config.sample_steps, counts=counts)
-    denormalized = generated * std[:3].to(device).view(1, 3, 1, 1) + mean[:3].to(device).view(1, 3, 1, 1)
-    free = torch.from_numpy(np.asarray(latents.latent[rows], np.float32))[:, 3:4].to(device)
-    codes = torch.cat([denormalized, free], dim=1)
+    generated = sampler(model, refs_in, std_in, steps=config.sample_steps, counts=counts)
+    channels = model.config.target_channels
+    denormalized = generated * std[:channels].to(device).view(1, channels, 1, 1) \
+        + mean[:channels].to(device).view(1, channels, 1, 1)
+    if channels >= 4:
+        codes = denormalized
+    else:
+        free = torch.from_numpy(np.asarray(latents.latent[rows], np.float32))[:, 3:4].to(device)
+        codes = torch.cat([denormalized, free], dim=1)
     decoded = decoder(codes).float()
     real = torch.from_numpy(images).float().to(device)[:, None] / 127.5 - 1
     mae = (decoded - real).abs().mean().item() * 127.5
@@ -154,9 +174,13 @@ def validate(model, ema, latents, stats, decoder, rows, images, used, store, dev
     return {"mae": mae, "oracle_mae": oracle_mae, "latent_mse": latent_mse}
 
 
-def save(path, model, config, flow_config, step, score):
+def save(path, model, config, flow_config, step, score, optimizer=None, ema=None):
     payload = {"model": model.state_dict(), "flow_config": asdict(flow_config),
                "train_config": asdict(config), "step": step, "score": score, "version": 1}
+    if optimizer is not None:
+        payload["optimizer"] = optimizer.state_dict()
+    if ema is not None:
+        payload["ema"] = ema.shadow
     temporary = str(path) + ".tmp"
     try:
         torch.save(payload, temporary)
@@ -169,11 +193,18 @@ def save(path, model, config, flow_config, step, score):
 def run(args):
     device = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else args.device)
     config = TrainConfig(**{k: getattr(args, k) for k in TrainConfig.__dataclass_fields__})
-    flow_config = FlowConfig(blocks=config.blocks, time_dim=config.time_dim,
-                             ref_hidden=config.ref_hidden, trunk_channels=config.trunk_channels,
-                             style_hidden=config.style_hidden, style_dilation=config.style_dilation,
-                             content_hidden=config.content_hidden,
-                             branch_channels=config.branch_channels, star=config.star)
+    if config.arch == "dit":
+        flow_config = DiTConfig(predict_free=config.predict_free, depth=config.depth,
+                                d_model=config.d_model, heads=config.heads, ffn=config.ffn)
+        model_class, loss_fn, sample_fn = DiTFlow, dit_flow_loss, dit_sample
+    else:
+        flow_config = FlowConfig(blocks=config.blocks, time_dim=config.time_dim,
+                                 ref_hidden=config.ref_hidden, trunk_channels=config.trunk_channels,
+                                 style_hidden=config.style_hidden, style_dilation=config.style_dilation,
+                                 content_hidden=config.content_hidden,
+                                 branch_channels=config.branch_channels, star=config.star,
+                                 predict_free=config.predict_free)
+        model_class, loss_fn, sample_fn = FlowModel, flow_loss, sample
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
@@ -186,18 +217,34 @@ def run(args):
         parameter.requires_grad_(False)
 
     store = GlyphStore(args.data)
-    train_set = LatentSet(args.latents, "train")
+    train_set = LatentSet(args.latents, "train", in_memory=config.in_memory)
     stats = LatentStats.from_latent(train_set.latent)
     dataset = FlowDataset(train_set, config.ref_min, config.ref_max, config.seed, config.condition)
     loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True,
                         num_workers=config.workers, collate_fn=collate, drop_last=True,
                         persistent_workers=config.workers > 0)
-    val_set = LatentSet(args.latents, "val")
+    val_set = LatentSet(args.latents, "val", in_memory=config.in_memory)
     rows, images, used = prepare_validation(val_set, store, 128, config.seed)
 
-    model = FlowModel(flow_config).to(device)
+    model = model_class(flow_config).to(device)
     ema = EMA(model, config.ema_decay)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=1e-4)
+    start_step, best = 0, math.inf
+    if getattr(args, "init_from", None):
+        warm = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        model.load_state_dict(warm["model"])
+        ema = EMA(model, config.ema_decay)
+        start_step = int(warm.get("step", 0))
+        best = float(warm.get("score", math.inf))
+        if "optimizer" in warm:
+            optimizer.load_state_dict(warm["optimizer"])
+        if "ema" in warm:
+            ema.shadow = {k: v.to(device) for k, v in warm["ema"].items()}
+        print(f"resume from {args.init_from}: step {start_step}, optimizer "
+              f"{'restored' if 'optimizer' in warm else 'fresh'}", flush=True)
+    if getattr(args, "start_step", -1) >= 0:
+        start_step = int(args.start_step)
+        print(f"step counter forced to {start_step}", flush=True)
 
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -209,9 +256,8 @@ def run(args):
     }, indent=2), encoding="utf-8")
 
     started = time.monotonic()
-    best = math.inf
     use_amp = config.precision == "bf16" and device.type == "cuda"
-    step = 0
+    step = start_step
     previous = {}
 
     def stop(signum, _frame):
@@ -222,9 +268,9 @@ def run(args):
     try:
         step, best = train_loop(config, loader, model, ema, optimizer, val_set, stats, decoder,
                                 rows, images, used, store, device, out, started, best, use_amp,
-                                flow_config)
+                                flow_config, start_step, loss_fn, sample_fn)
     except KeyboardInterrupt:
-        save(out / "last.pt", model, config, flow_config, step, best)
+        save(out / "last.pt", model, config, flow_config, step, best, optimizer, ema)
         print(f"interrupted at step {step}; saved {out / 'last.pt'}", flush=True)
     finally:
         for signum, handler in previous.items():
@@ -234,18 +280,19 @@ def run(args):
 
 
 def train_loop(config, loader, model, ema, optimizer, val_set, stats, decoder, rows, images, used,
-               store, device, out, started, best, use_amp, flow_config):
-    step = 0
+               store, device, out, started, best, use_amp, flow_config, start_step=0,
+               loss_fn=flow_loss, sampler=sample):
+    step = start_step
     while step < config.steps:
         for batch in loader:
             step += 1
             lr = learning_rate(step, config)
             for group in optimizer.param_groups:
                 group["lr"] = lr
-            standard, target, refs = normalize(batch, stats, device)
+            standard, target, refs = normalize(batch, stats, device, flow_config.target_channels)
             counts = batch["counts"].to(device)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-                loss, _ = flow_loss(model, refs, standard, target, counts)
+                loss, _ = loss_fn(model, refs, standard, target, counts)
             if not torch.isfinite(loss):
                 raise FloatingPointError("non-finite flow loss")
             optimizer.zero_grad(set_to_none=True)
@@ -257,13 +304,13 @@ def train_loop(config, loader, model, ema, optimizer, val_set, stats, decoder, r
                       "elapsed_seconds": time.monotonic() - started}
             if step % config.validate_every == 0 or step == config.steps:
                 record.update(validate(model, ema, val_set, stats, decoder, rows, images, used,
-                                       store, device, config, config.seed,
+                                       store, device, config, config.seed, sampler=sampler,
                                        preview=out / "previews" / f"val_{step:07d}.png"))
                 if record["mae"] < best:
                     best = record["mae"]
-                    save(out / "best.pt", model, config, flow_config, step, best)
+                    save(out / "best.pt", model, config, flow_config, step, best, optimizer, ema)
             if step % config.save_every == 0 or step == config.steps:
-                save(out / "last.pt", model, config, flow_config, step, best)
+                save(out / "last.pt", model, config, flow_config, step, best, optimizer, ema)
             if step % config.log_every == 0 or step == config.steps:
                 with (out / "metrics.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record) + "\n")
@@ -281,11 +328,19 @@ def main():
     parser.add_argument("--vae", required=True)
     parser.add_argument("--output", required=True)
     for field in TrainConfig.__dataclass_fields__.values():
-        if field.name == "star":
+        if field.name in ("star", "predict_free", "in_memory"):
             continue
         parser.add_argument(f"--{field.name.replace('_', '-')}", type=type(field.default),
                             default=field.default)
     parser.add_argument("--star", action="store_true", help="use three-convolution Star blocks")
+    parser.add_argument("--in-memory", action="store_true",
+                        help="load the latent arrays into RAM instead of mmap")
+    parser.add_argument("--predict-free", action="store_true",
+                        help="generate all four channels instead of borrowing the free block")
+    parser.add_argument("--init-from", default="",
+                        help="optional checkpoint to resume weights/optimizer/step from")
+    parser.add_argument("--start-step", type=int, default=-1,
+                        help="override the resumed step counter (-1 keeps the checkpoint value)")
     run(parser.parse_args())
 
 
